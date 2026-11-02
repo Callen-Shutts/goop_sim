@@ -1,0 +1,23 @@
+[project]
+name = "goop-sim"
+version = "0.1.0"
+description = "A 2D goop simulation game"
+requires-python = ">=3.11"
+dependencies = ["pygame-ce>=2.5"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+goop-sim = "goop_sim.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
