@@ -14,7 +14,8 @@ at the required purity, then keep extending it as contracts escalate.
 ## Controls
 
 - Drag equipment from the right-hand panel onto the canvas
-- Send a unit back to the inventory: right-click it, press Delete/Backspace when it's selected, use the faceplate's TO INV button, or drag it onto the panel (its pipes and contents are removed; settings are kept)
+- Send a unit back to the inventory: right-click it, press Delete/Backspace (selected unit, or the one under the mouse), use the faceplate's TO INV button, or drag it onto the panel (its pipes and contents are removed; settings are kept)
+- Ctrl+Z undoes layout edits (place, move, pipe, remove); Ctrl+Y or Ctrl+Shift+Z redoes. Also UNDO/REDO softkeys
 - Click an out port, then an in port, to run a pipe between them (Esc or right-click cancels)
 - Right-click a pipe to delete it
 - Click a unit to open its faceplate: start/stop pumps, drag the setpoint slider, +/- buttons

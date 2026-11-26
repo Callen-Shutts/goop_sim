@@ -3,6 +3,7 @@ import math
 import pygame
 
 from goop_sim import settings
+from goop_sim.run.history import History
 from goop_sim.run.state import RunState
 from goop_sim.scenes.base import Scene
 from goop_sim.sim.equipment import Pump, Reactor, Splitter
@@ -63,6 +64,7 @@ class PlayScene(Scene):
         self.scroll = 0
         self.controls = []  # (rect, on_click, on_drag) rebuilt every draw
         self.pipe_memory = {}  # last color seen in each pipe, so idle pipes stay tinted
+        self.history = History(run)  # undo/redo of layout edits (Ctrl+Z / Ctrl+Y)
         self.grid = self._make_grid()
         self.place_fixtures()
 
@@ -162,10 +164,12 @@ class PlayScene(Scene):
             self.pipe_memory.clear()
             self.result = None
 
-    def return_to_inventory(self, eq):
+    def return_to_inventory(self, eq, record=True):
         """Take a placed unit off the canvas: its pipes go, its contents are lost, settings are kept."""
         if eq is None or eq.fixed or eq not in self.net.equipment:
             return
+        if record:
+            self.history.record()
         for pipe in [p for p in self.net.pipes if eq in (p.out.equipment, p.into.equipment)]:
             self.pipe_memory.pop(pipe, None)
         if self.pending and self.pending.equipment is eq:
@@ -176,6 +180,21 @@ class PlayScene(Scene):
         self.run.inventory.append(eq)
         if self.selected is eq:
             self.selected = None
+
+    def undo(self):
+        if self.history.undo():
+            self._after_history()
+
+    def redo(self):
+        if self.history.redo():
+            self._after_history()
+
+    def _after_history(self):
+        self.pending = None
+        self.drag = None
+        if self.selected is not None and self.selected not in self.net.equipment:
+            self.selected = None
+        self.scroll = min(self.scroll, self.max_scroll())
 
     def nudge(self, eq, steps):
         if isinstance(eq, (Pump, Splitter)):
@@ -234,9 +253,15 @@ class PlayScene(Scene):
             elif FACEPLATE.collidepoint(self.mouse):
                 self.nudge(self.selected, event.y)
         elif event.type == pygame.KEYDOWN:
+            ctrl = event.mod & pygame.KMOD_CTRL
+            shift = event.mod & pygame.KMOD_SHIFT
             if self.result:
                 if event.key == pygame.K_RETURN:
                     self.on_continue()
+            elif ctrl and event.key == pygame.K_z:
+                self.redo() if shift else self.undo()
+            elif ctrl and event.key == pygame.K_y:
+                self.redo()
             elif event.key == pygame.K_ESCAPE:
                 self.pending = None
                 self.selected = None
@@ -245,7 +270,10 @@ class PlayScene(Scene):
             elif event.key == pygame.K_f:
                 self.cycle_speed()
             elif event.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
-                self.return_to_inventory(self.selected)
+                target = self.selected
+                if target is None and self.in_canvas(self.mouse):
+                    target = self.equipment_at(self.mouse)
+                self.return_to_inventory(target)
             elif event.key in (pygame.K_UP, pygame.K_RIGHT):
                 self.nudge(self.selected, 1)
             elif event.key in (pygame.K_DOWN, pygame.K_LEFT):
@@ -264,7 +292,9 @@ class PlayScene(Scene):
                     if not self.net.pipe_at(port):
                         self.pending = port
                 else:
-                    self.net.connect(self.pending, port)
+                    before = self.history.snapshot()
+                    if self.net.connect(self.pending, port):
+                        self.history.push(before)
                     self.pending = None
                 return
             self.pending = None
@@ -280,11 +310,20 @@ class PlayScene(Scene):
                     "start": pos,
                     "moved": False,
                     "from_inventory": False,
+                    "before": self.history.snapshot(),  # undo point, kept only if the drag changes something
                 }
             return
         item = self.card_at(pos)
         if item:
-            self.drag = {"eq": item, "offset": (0, 0), "start": pos, "moved": False, "from_inventory": True, "pos": pos}
+            self.drag = {
+                "eq": item,
+                "offset": (0, 0),
+                "start": pos,
+                "moved": False,
+                "from_inventory": True,
+                "pos": pos,
+                "before": self.history.snapshot(),
+            }
 
     def on_right_down(self, pos):
         if self.pending:
@@ -298,6 +337,7 @@ class PlayScene(Scene):
             return
         pipe = self.pipe_at(pos)
         if pipe:
+            self.history.record()
             self.net.disconnect(pipe)
             self.pipe_memory.pop(pipe, None)
 
@@ -331,9 +371,12 @@ class PlayScene(Scene):
             return
         if not self.in_canvas(pos):
             if not d["from_inventory"]:
-                self.return_to_inventory(eq)
+                self.history.push(d["before"])  # undo puts it back where the drag started
+                self.return_to_inventory(eq, record=False)
             return
         target = snap((pos[0] + d["offset"][0], pos[1] + d["offset"][1]))
+        if d["from_inventory"] or target != dict(d["before"][0]).get(eq):
+            self.history.push(d["before"])
         if d["from_inventory"]:
             self.run.inventory.remove(eq)
             self.net.add(eq)
@@ -530,6 +573,8 @@ class PlayScene(Scene):
                 theme.KEY if self.run.restarts_left else theme.KEY_DISABLED,
                 140,
             ),
+            ("UNDO ^Z", self.undo, theme.KEY if self.history.undo_stack else theme.KEY_DISABLED, 80),
+            ("REDO ^Y", self.redo, theme.KEY if self.history.redo_stack else theme.KEY_DISABLED, 80),
         ]
         for label, action, fill, width in keys:
             rect = pygame.Rect(x, top + 6, width, H - top - 12)
@@ -538,7 +583,7 @@ class PlayScene(Scene):
             x += width + 8
         state = "RUNNING" if self.running else "PAUSED"
         widgets.draw_text(surface, self.font, (x + 8, top + 14), state, theme.OK if self.running else theme.MUTED, "midleft")
-        hint = "drag cards | out->in port: pipe | right-click unit/pipe: remove | F11 fullscreen | Ctrl+Q quit"
+        hint = "Del/right-click: unit to inventory | F11 fullscreen | Ctrl+Q quit"
         widgets.draw_text(surface, self.font, (x + 8, top + 33), hint, theme.MUTED, "midleft")
 
     def draw_legend(self, surface):
