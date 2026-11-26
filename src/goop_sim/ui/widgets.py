@@ -91,29 +91,83 @@ def draw_bar(surface, rect, fraction, color, edge=theme.VALUE_EDGE):
 # -- pipes --------------------------------------------------------------------
 
 
-def draw_pipe(surface, points, color, flow_gpm: float, t: float, highlight=False):
-    """A pipe with its contents' color inside and dots moving with the flow."""
+def pipe_fill(pipe) -> list[tuple[float, float, tuple]]:
+    """What a pipe holds as (start, end, color) fractions of its length, measured from the inlet
+    end: the newest liquid is nearest the inlet, the oldest furthest along. A pipe with no holdup
+    is shown full of whatever passed through it last."""
+    cap = pipe.capacity_gal
+    if cap <= 0:
+        color = blend(pipe.carried)
+        return [(0.0, 1.0, color)] if color else []
+    out, at = [], 0.0
+    for slug in reversed(pipe.slugs):
+        size = slug.total() / cap
+        color = blend(slug)
+        if color and size > 0:
+            end = min(1.0, at + size)
+            if out and out[-1][2] == color:
+                out[-1] = (out[-1][0], end, color)
+            else:
+                out.append((at, end, color))
+        at = min(1.0, at + size)
+    return out
+
+
+def _slice(points, lengths, total, f0, f1):
+    """Points of the polyline between fractions f0 and f1 of its length."""
+    d0, d1 = f0 * total, f1 * total
+    out, run = [], 0.0
+    for (a, b), seg in zip(zip(points, points[1:]), lengths):
+        if seg <= 0:
+            continue
+        lo, hi = max(d0, run), min(d1, run + seg)
+        if lo <= hi:
+            av, bv = pygame.Vector2(a), pygame.Vector2(b)
+            p0 = av + (bv - av) * ((lo - run) / seg)
+            p1 = av + (bv - av) * ((hi - run) / seg)
+            if not out:
+                out.append(p0)
+            out.append(p1)
+        run += seg
+    return out
+
+
+def draw_pipe(surface, points, fill, flow_gpm: float, t: float, highlight=False):
+    """A pipe drawn with what it holds (`fill` from `pipe_fill`), so a front of liquid moves along
+    it as it fills, and dots move through the filled part while it flows."""
     wall = theme.PIPE_HOVER if highlight else theme.PIPE_WALL
     pygame.draw.lines(surface, wall, False, points, 10)
     for p in points:
         pygame.draw.circle(surface, wall, p, 5)
-    inner = color or theme.PIPE_EMPTY
-    pygame.draw.lines(surface, inner, False, points, 6)
-    for p in points[1:-1]:
-        pygame.draw.circle(surface, inner, p, 3)
-    if flow_gpm <= 0 or not color:
+    pygame.draw.lines(surface, theme.PIPE_EMPTY, False, points, 6)
+    lengths = [pygame.Vector2(a).distance_to(b) for a, b in zip(points, points[1:])]
+    total = sum(lengths)
+    if total <= 0 or not fill:
         return
-    dot = mix(color, (255, 255, 255), 0.65)
+    for f0, f1, color in fill:
+        part = _slice(points, lengths, total, f0, f1)
+        if len(part) >= 2:
+            pygame.draw.lines(surface, color, False, part, 6)
+            for p in part[1:-1]:
+                pygame.draw.circle(surface, color, p, 3)
+    if flow_gpm <= 0:
+        return
+    filled = fill[-1][1] * total
     spacing = 22
     speed = 25 + min(flow_gpm, 800) / 5  # px per second
     d = (t * speed) % spacing
-    for a, b in zip(points, points[1:]):
+    run = 0.0
+    for (a, b), length in zip(zip(points, points[1:]), lengths):
         av, bv = pygame.Vector2(a), pygame.Vector2(b)
-        length = av.distance_to(bv)
-        while length > 0 and d <= length:
-            pygame.draw.circle(surface, dot, av + (bv - av) * (d / length), 2)
+        while length > 0 and d <= length and run + d <= filled:
+            at = run + d
+            color = next((c for f0, f1, c in fill if f0 * total <= at <= f1 * total), fill[-1][2])
+            pygame.draw.circle(surface, mix(color, (255, 255, 255), 0.65), av + (bv - av) * (d / length), 2)
             d += spacing
+        if run + d > filled:
+            break
         d -= length
+        run += length
 
 
 def draw_hop(surface, arc, color, highlight=False):
@@ -132,9 +186,11 @@ def pipe_details(pipe, dt: float, running: bool) -> list[str]:
         return eq.name
 
     lines = [f"PIPE {end(pipe.out)} -> {end(pipe.into)}"]
+    if pipe.capacity_gal > 0:
+        lines.append(f" HOLDS {pipe.held_gal:,.0f}/{pipe.capacity_gal:,.0f} GAL")
     total = pipe.carried.total()
     if total <= 1e-9 or dt <= 0:
-        lines.append(" EMPTY / NO FLOW")
+        lines.append(" NO FLOW")
         return lines
     gpm = total * 60 / dt
     lines.append(f" FLOW {gpm:,.0f} GPM" + ("" if running else "  (paused)"))
@@ -153,7 +209,7 @@ def _tag_points(rect):
     return [rect.topleft, (rect.right - tip, rect.top), (rect.right, rect.centery), (rect.right - tip, rect.bottom), rect.bottomleft]
 
 
-def draw_body(surface, eq: Equipment, rect: pygame.Rect, font=None, fill=None):
+def draw_body(surface, eq: Equipment, rect: pygame.Rect, font=None):
     """The equipment's symbol inside `rect`. Used full size on the canvas and tiny for icons."""
     small = rect.height < 50
     if isinstance(eq, Tank):
@@ -194,11 +250,16 @@ def draw_body(surface, eq: Equipment, rect: pygame.Rect, font=None, fill=None):
         blade = rect.width // 4
         y = body.centery + body.height // 5
         pygame.draw.line(surface, theme.OUTLINE, (rect.centerx - blade, y), (rect.centerx + blade, y), max(1, rect.width // 30))
-        if fill:
-            glass = pygame.Rect(0, 0, rect.width // 3, rect.height // 7)
-            glass.center = (rect.centerx, body.bottom - body.height // 5)
-            pygame.draw.rect(surface, fill, glass, border_radius=3)
-            pygame.draw.rect(surface, theme.OUTLINE, glass, 1, border_radius=3)
+        if not small and eq.volume_gal:
+            # Level gauge on the shell, like a tank's sight glass.
+            glass = pygame.Rect(0, 0, max(6, rect.width // 9), body.height // 2)
+            glass.center = (rect.centerx + rect.width // 4, body.centery + 2)
+            pygame.draw.rect(surface, theme.GLASS, glass)
+            color = blend(eq.content)
+            h = round(glass.height * eq.level)
+            if color and h > 0:
+                pygame.draw.rect(surface, color, (glass.x, glass.bottom - h, glass.width, h))
+            pygame.draw.rect(surface, theme.OUTLINE, glass, 1)
     elif isinstance(eq, Separator):
         draw_vessel(surface, rect, rect.width // 2)
         gap = max(4, rect.height // 11)
@@ -232,11 +293,11 @@ def draw_body(surface, eq: Equipment, rect: pygame.Rect, font=None, fill=None):
             draw_text(surface, font, (rect.x + 8, rect.y + 6), eq.name, theme.TEXT, "topleft")
 
 
-def draw_equipment(surface, font, eq: Equipment, pos=None, ports=True, highlight=None, selected=False, fill=None, spec=None):
+def draw_equipment(surface, font, eq: Equipment, pos=None, ports=True, highlight=None, selected=False, spec=None):
     rect = rect_of(eq, pos)
     if selected:
         pygame.draw.rect(surface, theme.SELECT, rect.inflate(14, 14), 1)
-    draw_body(surface, eq, rect, font, fill)
+    draw_body(surface, eq, rect, font)
     if isinstance(eq, Tank):
         draw_text(surface, font, (rect.centerx, rect.y - 30), eq.name, theme.TAG_TEXT)
         pct = eq.volume_gal / eq.capacity_gal if eq.capacity_gal else 0
@@ -335,6 +396,10 @@ def details(eq: Equipment) -> list[str]:
         return [f"{eq.name}  TANK", f"CAP {eq.capacity_gal:,.0f} GAL", *composition_lines(eq.content)]
     if isinstance(eq, Reactor):
         lines = [f"{eq.name}  REACTOR", f"{eq.reaction.label}", f"CONVERSION {eq.conversion:.0%}", f"RATED {eq.rated_gpm:.0f} GPM"]
+        if eq.volume_gal:
+            lines.append(f"HOLDS {eq.content.total():,.0f}/{eq.volume_gal:,.0f} GAL")
+            if eq.content.total() > 0.5:
+                lines += composition_lines(eq.content)
         if eq.load_gpm > eq.rated_gpm + 0.5:
             lines.append(f"OVERLOADED: {eq.effective_conversion(eq.load_gpm):.0%} NOW")
         if eq.side:
@@ -359,7 +424,11 @@ def details(eq: Equipment) -> list[str]:
     if isinstance(eq, Outlet):
         lines = [f"{eq.name}  RECEIVED", *composition_lines(eq.received)]
         if eq.spec:
+            species, purity = eq.spec
+            lines.insert(1, f"WANTS {species} AT {purity:.0%}+ PURITY")
             lines.append(f" OFF-SPEC {eq.rejected_gal:,.0f} GAL")
+        elif eq.name.startswith("PRODUCT"):
+            lines.insert(1, "NOT USED THIS CONTRACT")
         return lines
     return [eq.name]
 

@@ -29,9 +29,9 @@ class RunState:
         self.namer = Namer()
         self.net = Network()
         self.feed = Feed("FEED")
-        self.product = Outlet("PRODUCT")
+        self.products: list[Outlet] = []  # one PRODUCT outlet per order; more are added as contracts grow
         self.waste = Outlet("WASTE", n_in=3)
-        for fixture in (self.feed, self.product, self.waste):
+        for fixture in (self.feed, self.waste):
             self.net.add(fixture)
         self.inventory: list[Equipment] = starting_hand(self.rng, self.chem, self.namer)
         self.money = START_MONEY
@@ -40,13 +40,27 @@ class RunState:
         self.last_payout: Payout | None = None
         self.offers: list[Equipment] = []
         self.reroll_cost = REROLL_COST
-        self.start_contract()
+        self.next_contract: Contract | None = None  # rolled when a contract is paid, shown in the store
+        self.start_contract(make_contract(self.level, self.chem, self.rng))
 
     # -- contract ---------------------------------------------------------
 
-    def start_contract(self) -> None:
-        self.contract: Contract = make_contract(self.level, self.chem, self.rng)
-        self.product.spec = self.contract.spec
+    @property
+    def product(self) -> Outlet:
+        """The first PRODUCT outlet (the level's main order)."""
+        return self.products[0]
+
+    def start_contract(self, contract: Contract) -> None:
+        self.contract = contract
+        while len(self.products) < len(contract.orders):
+            n = len(self.products) + 1
+            outlet = Outlet("PRODUCT" if n == 1 else f"PRODUCT {n}")
+            self.products.append(outlet)
+            self.net.add(outlet)
+        for outlet, order in zip(self.products, contract.orders):
+            outlet.spec = order.spec
+        for outlet in self.products[len(contract.orders) :]:
+            outlet.spec = None  # not used by this contract
         self.restarts_left = RESTARTS
         self.carried_offspec = 0.0
         self.carried_spill = 0.0
@@ -57,13 +71,13 @@ class RunState:
         for eq in self.net.equipment + self.inventory:
             eq.reset()
         self.feed.stock = self.contract.feed.copy()
-        self.net.spilled_gal = 0.0
+        self.net.clear_spills()
         for pipe in self.net.pipes:
-            pipe.carried.clear()
+            pipe.empty()
 
     @property
     def offspec_total(self) -> float:
-        return self.carried_offspec + self.product.rejected_gal
+        return self.carried_offspec + sum(o.rejected_gal for o in self.products)
 
     @property
     def spill_total(self) -> float:
@@ -71,7 +85,7 @@ class RunState:
 
     @property
     def met(self) -> bool:
-        return self.contract.check(self.product)
+        return self.contract.check(self.products)
 
     @property
     def feed_empty(self) -> bool:
@@ -87,7 +101,8 @@ class RunState:
         return True
 
     def preview_payout(self) -> Payout:
-        return settle(self.contract, self.product.accepted_purity, self.offspec_total, self.spill_total)
+        purities = [o.accepted_purity for o in self.products[: len(self.contract.orders)]]
+        return settle(self.contract, purities, self.offspec_total, self.spill_total)
 
     def complete_contract(self) -> Payout:
         """Pay out the met contract and stock the store. Call once per contract."""
@@ -97,6 +112,7 @@ class RunState:
         self.last_payout = payout
         self.reroll_cost = REROLL_COST
         self.offers = shop_offers(self.rng, self.chem, self.namer, self.level + 1, SHOP_OFFERS)
+        self.next_contract = make_contract(self.level + 1, self.chem, self.rng, min_orders=len(self.products))
         return payout
 
     # -- store ------------------------------------------------------------
@@ -129,4 +145,6 @@ class RunState:
         self.inventory.extend(grant)
         self.offers = []
         self.level += 1
-        self.start_contract()
+        contract = self.next_contract or make_contract(self.level, self.chem, self.rng, min_orders=len(self.products))
+        self.next_contract = None
+        self.start_contract(contract)

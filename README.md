@@ -7,9 +7,9 @@ See `CLAUDE.md` and `docs/` for design, architecture and session logs.
 ## Concept
 
 A roguelike chemical-engineering game with an HMI/SCADA-style interface. Each run
-rolls new chemistry (species, feed, reaction chain) and deals random equipment (reactors,
+rolls its own reaction stoichiometry (letters stay A, B, C...; waste is W) and deals random equipment (reactors,
 columns, splitters, mixers, pumps, tanks). Build a plant that turns the feed into each
-contract's product at the required purity, get paid (more for purer product, less for
+contract's products (up to three at once, each at its own purity, each into its own PRODUCT outlet), get paid (more for purer product, less for
 off-spec and spills), spend it in the store, and keep extending the plant.
 
 ## Controls
@@ -17,6 +17,7 @@ off-spec and spills), spend it in the store, and keep extending the plant.
 - Drag equipment from the right-hand panel onto the canvas
 - Send a unit back to the inventory: right-click it, press Delete/Backspace (selected unit, or the one under the mouse), use the faceplate's TO INV button, or drag it onto the panel (its pipes and contents are removed; settings are kept)
 - Ctrl+Z undoes layout edits (place, move, pipe, remove); Ctrl+Y or Ctrl+Shift+Z redoes. Also UNDO/REDO softkeys
+- T or the TIDY softkey auto-arranges the plant into tidy left-to-right columns (undoable)
 - Click an out port, then an in port, to run a pipe between them (Esc or right-click cancels)
 - Right-click a pipe to delete it
 - Click a unit to open its faceplate: start/stop pumps, drag the setpoint slider, +/- buttons

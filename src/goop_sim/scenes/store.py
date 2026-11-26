@@ -117,11 +117,14 @@ class StoreScene(Scene):
     def draw_next(self, surface):
         rect = pygame.Rect(460, 54, W - 480, 126)
         widgets.draw_frame(surface, self.font, rect, "NEXT CONTRACT")
-        nxt = self.run.chem.target(self.run.level + 1)
+        nxt = self.run.next_contract
         x, y = rect.x + 12, rect.y + 30
-        widgets.draw_text(surface, self.font, (x, y), f"Wants {nxt}. Your plant, settings and inventory carry over.", theme.TEXT, "topleft")
+        wants = nxt.summary if nxt else self.run.chem.target(self.run.level + 1)
+        widgets.draw_text(surface, self.font, (x, y), f"WANTS {wants}", theme.TEXT, "topleft")
+        if nxt and len(nxt.orders) > len(self.run.products):
+            widgets.draw_text(surface, self.font, (rect.right - 12, y), "+ NEW PRODUCT OUTLET", theme.WARN, "topright")
         widgets.draw_text(
-            surface, self.font, (x, y + 20), "Pay rewards purity above spec, not volume. Off-spec and spills are charged.", theme.MUTED, "topleft"
+            surface, self.font, (x, y + 20), "Plant, settings and inventory carry over. Pay rewards purity above spec, not volume.", theme.MUTED, "topleft"
         )
         if self.grant:
             eq = self.grant[0]

@@ -70,12 +70,14 @@ def _simplify(points):
 
 
 LANE = 12  # spacing between parallel pipes that would otherwise overlap (pipe wall is 10 px)
+READOUT_CLEARANCE = 50  # value boxes hang this far below a unit; recycle loops pass under them
 
 
-def pipe_points(pipe: Pipe, lane: int = 0) -> list[tuple[int, int]]:
+def pipe_points(pipe: Pipe, lane: int = 0, obstacles=()) -> list[tuple[int, int]]:
     """Orthogonal route. Forward pipes are a Z with the vertical leg near the middle; backward
-    (recycle) pipes step out, run below both units, and step back in. `lane` shifts the free
-    legs so parallel pipes do not draw on top of each other."""
+    (recycle) pipes step out, run below both units (and below the readouts of any of
+    `obstacles` they pass under), and step back in. `lane` shifts the free legs so parallel
+    pipes do not draw on top of each other."""
     x1, y1 = port_pos(pipe.out)
     x2, y2 = port_pos(pipe.into)
     if x2 > x1 + 4:
@@ -85,6 +87,13 @@ def pipe_points(pipe: Pipe, lane: int = 0) -> list[tuple[int, int]]:
     k = lane * LANE
     low = max(rect_of(pipe.out.equipment).bottom, rect_of(pipe.into.equipment).bottom) + GRID + k
     xa, xb = x1 + GRID + k, x2 - GRID - k
+    ends_top = min(y1, y2)
+    for eq in obstacles:
+        if eq.pos is None:
+            continue
+        r = rect_of(eq)
+        if r.right > xb and r.left < xa and r.bottom >= ends_top:  # the loop's bottom run passes under it
+            low = max(low, r.bottom + READOUT_CLEARANCE + k)
     return _simplify([(x1, y1), (xa, y1), (xa, low), (xb, low), (xb, y2), (x2, y2)])
 
 
@@ -104,14 +113,14 @@ def _overlap(segs, taken) -> bool:
     return any(abs(c - tc) < LANE - 1 and min(hi, thi) - max(lo, tlo) > 2 for c, lo, hi in segs for tc, tlo, thi in taken)
 
 
-def lay_out_pipes(pipes: list[Pipe], max_lanes: int = 8) -> dict[Pipe, list[tuple[int, int]]]:
+def lay_out_pipes(pipes: list[Pipe], max_lanes: int = 8, obstacles=()) -> dict[Pipe, list[tuple[int, int]]]:
     """Route every pipe, picking the first lane whose free legs don't overlap pipes routed before it."""
     taken_v, taken_h = [], []
     out = {}
     for pipe in pipes:
         choice = None
         for lane in range(max_lanes):
-            pts = pipe_points(pipe, lane)
+            pts = pipe_points(pipe, lane, obstacles)
             vert, horiz = _segments(pts)
             # Port stubs are fixed, so only judge the legs a lane can actually move.
             free_v = vert if len(pts) > 2 else []
@@ -119,7 +128,7 @@ def lay_out_pipes(pipes: list[Pipe], max_lanes: int = 8) -> dict[Pipe, list[tupl
             if not _overlap(free_v, taken_v) and not _overlap(free_h, taken_h):
                 choice = pts
                 break
-        choice = choice or pipe_points(pipe)
+        choice = choice or pipe_points(pipe, 0, obstacles)
         vert, horiz = _segments(choice)
         taken_v.extend(vert)
         taken_h.extend(horiz)
@@ -131,14 +140,14 @@ HOP_RADIUS = 11
 _HOP_STEPS = 10
 
 
-def route_pipes(pipes: list[Pipe]) -> dict[Pipe, tuple[list, list]]:
+def route_pipes(pipes: list[Pipe], obstacles=()) -> dict[Pipe, tuple[list, list]]:
     """Drawable path for every pipe, with line jumps where pipes cross.
 
     Convention: a horizontal run hops over any other pipe's vertical run that crosses it.
     Returns {pipe: (path, hops)}; `path` includes the arc points, `hops` lists each arc so it
     can be redrawn on top of the pipe it jumps.
     """
-    base = lay_out_pipes(pipes)
+    base = lay_out_pipes(pipes, obstacles=obstacles)
     verticals = []
     for pipe, pts in base.items():
         for (x1, y1), (x2, y2) in zip(pts, pts[1:]):

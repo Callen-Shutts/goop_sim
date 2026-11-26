@@ -40,6 +40,7 @@ def make_reactor(rng: random.Random, namer: Namer, chem: Chemistry, reaction: Re
     if rng.random() < SIDE_REACTION_CHANCE:
         reactor.side = side_reaction_for(rng, reaction, chem.waste)
         reactor.side_conversion = round(rng.uniform(0.03, 0.15), 2)
+    reactor.volume_gal = rng.choice([200, 250, 300, 350])  # holdup: liquid takes a while to come through
     return reactor
 
 

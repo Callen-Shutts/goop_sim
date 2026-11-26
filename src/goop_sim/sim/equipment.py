@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 
 from goop_sim.sim.chemistry import Reaction
@@ -133,9 +134,14 @@ def overload(rated_gpm: float, gpm: float) -> float:
 
 @dataclass(eq=False)
 class Reactor(Equipment):
-    """Runs one main reaction on what passes through, plus an optional side reaction.
+    """A stirred vessel running one main reaction, plus an optional side reaction.
 
-    Above `rated_gpm` there is less residence time, so the main conversion drops.
+    With a `volume_gal` it holds liquid like a small tank: inflow mixes into `content`, the
+    content reacts over time, and nothing leaves until it is full (then outflow = overflow).
+    The reaction rate is set from the current flow so that running steadily at `gpm` converts
+    `effective_conversion(gpm)` of the limiting reactant, as listed. Above `rated_gpm` there
+    is less residence time, so conversion drops. With volume 0 it converts each inflow
+    instantly (no holdup).
     """
 
     reaction: Reaction | None = None
@@ -144,18 +150,43 @@ class Reactor(Equipment):
     side_conversion: float = 0.0
     rated_gpm: float = 10_000
     load_gpm: float = 0.0  # flow through during the last step
+    volume_gal: float = 0.0
+    content: Stream = field(default_factory=Stream)
+
+    @property
+    def level(self) -> float:
+        return min(1.0, self.content.total() / self.volume_gal) if self.volume_gal else 0.0
 
     def effective_conversion(self, gpm: float) -> float:
         return self.conversion * overload(self.rated_gpm, gpm) ** 0.8
 
     def react(self, stream: Stream, gpm: float = 0.0) -> None:
+        """Instant conversion of a passing stream (the no-holdup case)."""
         if self.reaction:
             self.reaction.apply(stream, self.effective_conversion(gpm))
         if self.side:
             self.side.apply(stream, self.side_conversion)
 
+    def run(self, inflow: Stream, gpm: float, dt: float) -> Stream:
+        """Take `inflow` (arriving at `gpm` over `dt` seconds); return what overflows out."""
+        if not self.volume_gal:
+            out = inflow.copy()
+            self.react(out, gpm)
+            return out
+        self.content.add(inflow)
+        if gpm > 0:
+            tau = self.volume_gal * 60 / gpm  # residence time, seconds
+            for reaction, x in ((self.reaction, self.effective_conversion(gpm)), (self.side, self.side_conversion)):
+                if reaction and x > 0:
+                    # Stirred-tank kinetics: steady conversion k*tau/(1+k*tau) equals x.
+                    k = min(x, 0.99) / (1 - min(x, 0.99)) / tau
+                    reaction.apply(self.content, 1 - math.exp(-k * dt))
+        excess = self.content.total() - self.volume_gal
+        return self.content.take(excess) if excess > 1e-9 else Stream()
+
     def reset(self) -> None:
         self.load_gpm = 0.0
+        self.content = Stream()
 
 
 @dataclass(eq=False)

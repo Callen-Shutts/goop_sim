@@ -1,14 +1,18 @@
-"""Species and reactions. Every run rolls its own species names, feed and reaction chain."""
+"""Species and reactions. Letters are fixed (feed A or A+B, products in alphabetical order after
+the feed, waste W); every run rolls its own feed mix and reaction stoichiometry."""
 
+import math
 import random
 from dataclasses import dataclass
 
 from goop_sim.sim.stream import Stream
 
-# Species are single letters, picked fresh each run (I and O left out: they read like 1 and 0).
-LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
-CHAIN_LENGTH = 3
+LETTERS = "ABCDEFGH"  # feed species first, then each new product in the order it is unlocked
+WASTE = "W"
+CHAIN_LENGTH = 4
 TWO_FEED_CHANCE = 0.4
+COEFFICIENTS = [1, 1, 2, 2, 3]
+SECOND_REACTANT_CHANCE = 0.65
 
 
 @dataclass(eq=False)
@@ -98,30 +102,43 @@ class Chemistry:
 
 
 def generate_chemistry(rng: random.Random) -> Chemistry:
-    names = rng.sample(LETTERS, CHAIN_LENGTH + 3)
-    waste = names.pop()
+    """A run's chemistry. The chain is fixed for the whole run and unlocks one reaction per level.
+
+    Reaction 1 makes the first product from the feed. Every later reaction uses at least one
+    product the plant already makes (any earlier one, newer ones likelier), maybe with one more
+    species it has, so each level builds on the plant from before. Stoichiometric coefficients
+    are random (1-3).
+    """
     if rng.random() < TWO_FEED_CHANCE:
         major = rng.choice([0.5, 0.6, 0.7])
-        feed = {names[0]: major, names[1]: round(1 - major, 2)}
-        products = names[2 : 2 + CHAIN_LENGTH]
+        feed = {"A": major, "B": round(1 - major, 2)}
     else:
-        feed = {names[0]: 1.0}
-        products = names[1 : 1 + CHAIN_LENGTH]
+        feed = {"A": 1.0}
+    products = list(LETTERS[len(feed) : len(feed) + CHAIN_LENGTH])
 
     known = list(feed)
-    chain = []
-    for step, product in enumerate(products):
-        # The newest species always takes part, so each contract builds on the last one's product.
-        anchor = known[-1] if step else rng.choice(list(feed))
-        reactants = {anchor: rng.choice([1, 1, 2])}
-        others = [s for s in known if s != anchor]
-        if step == 0 and len(feed) == 2 and rng.random() < 0.6:
-            reactants[others[0]] = 1  # the two feeds combine
-        elif others and rng.random() < 0.5:
-            reactants[rng.choice(others)] = 1
-        chain.append(Reaction(reactants, {product: 1}))
+    made: list[str] = []
+    chain: list[Reaction] = []
+    for product in products:
+        for _try in range(20):
+            if not made:
+                if len(feed) == 2 and rng.random() < 0.6:
+                    reactants = {"A": rng.choice(COEFFICIENTS), "B": rng.choice(COEFFICIENTS)}  # the two feeds combine
+                else:
+                    reactants = {rng.choice(list(feed)): rng.choice([1, 2, 2, 3])}
+            else:
+                anchor = rng.choices(made, weights=range(1, len(made) + 1))[0]
+                reactants = {anchor: rng.choice(COEFFICIENTS)}
+                others = [s for s in known if s != anchor]
+                if rng.random() < SECOND_REACTANT_CHANCE:
+                    reactants[rng.choice(others)] = rng.choice(COEFFICIENTS)
+            if all(set(reactants) != set(r.reactants) for r in chain):
+                break  # each reaction uses a different set of species
+        g = math.gcd(*reactants.values()) if len(reactants) > 1 else 1  # 2A + 2B -> A + B; 2C -> D stays
+        chain.append(Reaction({sp: c // g for sp, c in sorted(reactants.items())}, {product: 1}))
         known.append(product)
-    return Chemistry(chain, feed, waste)
+        made.append(product)
+    return Chemistry(chain, feed, WASTE)
 
 
 def side_reaction_for(rng: random.Random, main: Reaction, waste: str) -> Reaction:

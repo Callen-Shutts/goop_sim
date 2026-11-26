@@ -68,7 +68,7 @@ def set_species(order, waste) -> None:
     SPECIES[waste] = WASTE_COLOR
 
 
-set_species("ABCD", "E")
+set_species("ABCD", "W")
 
 TOOLBAR_HEIGHT = 40
 BOTTOM_BAR = 48

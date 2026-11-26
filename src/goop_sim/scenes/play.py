@@ -6,9 +6,11 @@ from goop_sim import settings
 from goop_sim.run.history import History
 from goop_sim.run.state import RunState
 from goop_sim.scenes.base import Scene
-from goop_sim.sim.equipment import Pump, Reactor, Splitter
+from goop_sim.sim.equipment import Outlet, Pump, Reactor, Splitter
 from goop_sim.sim.network import Port
+from goop_sim.sim.stream import Stream
 from goop_sim.ui import theme, widgets
+from goop_sim.ui.layout import tidy
 from goop_sim.ui.geometry import (
     GRID,
     PORT_RADIUS,
@@ -63,7 +65,6 @@ class PlayScene(Scene):
         self.t = 0.0
         self.scroll = 0
         self.controls = []  # (rect, on_click, on_drag) rebuilt every draw
-        self.pipe_memory = {}  # last color seen in each pipe, so idle pipes stay tinted
         self.history = History(run)  # undo/redo of layout edits (Ctrl+Z / Ctrl+Y)
         theme.set_species(run.chem.species, run.chem.waste)
         self.grid = self._make_grid()
@@ -75,11 +76,9 @@ class PlayScene(Scene):
 
     def place_fixtures(self):
         mid = (CANVAS_TOP + CANVAS_BOTTOM) // 2
-        spots = {
-            self.run.feed: (70, mid),
-            self.run.product: (CANVAS_RIGHT - 80, mid - 120),
-            self.run.waste: (CANVAS_RIGHT - 80, mid + 120),
-        }
+        spots = {self.run.feed: (70, mid), self.run.waste: (CANVAS_RIGHT - 80, mid + 150)}
+        for outlet, dy in zip(self.run.products, (-230, -110, 10)):  # PRODUCT, PRODUCT 2, PRODUCT 3, top to bottom
+            spots[outlet] = (CANVAS_RIGHT - 80, mid + dy)
         for eq, pos in spots.items():
             if eq.pos is None:
                 eq.pos = snap(pos)
@@ -128,7 +127,7 @@ class PlayScene(Scene):
 
     def pipe_at(self, pos):
         """Hit-test against the drawn routes (lanes and jumps included)."""
-        for pipe, (path, _hops) in route_pipes(self.net.pipes).items():
+        for pipe, (path, _hops) in route_pipes(self.net.pipes, self.net.equipment).items():
             if any(dist_to_segment(pos, a, b) <= 6 for a, b in zip(path, path[1:])):
                 return pipe
         return None
@@ -162,7 +161,6 @@ class PlayScene(Scene):
     def restart(self):
         if self.run.restart():
             self.running = False
-            self.pipe_memory.clear()
             self.result = None
 
     def return_to_inventory(self, eq, record=True):
@@ -172,7 +170,7 @@ class PlayScene(Scene):
         if record:
             self.history.record()
         for pipe in [p for p in self.net.pipes if eq in (p.out.equipment, p.into.equipment)]:
-            self.pipe_memory.pop(pipe, None)
+            pipe.empty()  # its contents are lost with the unit
         if self.pending and self.pending.equipment is eq:
             self.pending = None
         self.net.remove(eq)
@@ -197,6 +195,22 @@ class PlayScene(Scene):
             self.selected = None
         self.scroll = min(self.scroll, self.max_scroll())
 
+    def legend_rect(self) -> pygame.Rect:
+        height = 48 + 18 * len(self.run.chem.known(self.run.level))
+        return pygame.Rect(10, CANVAS_BOTTOM - height - 10, 240, height)
+
+    def tidy_up(self):
+        """Auto-arrange the plant into left-to-right columns (one undo step)."""
+        if self.drag:
+            return
+        area = pygame.Rect(20, CANVAS_TOP + 20, CANVAS_RIGHT - 40, CANVAS_BOTTOM - CANVAS_TOP - 40)
+        moves = tidy(self.net, area, [self.legend_rect()])
+        if all(eq.pos == p for eq, p in moves.items()):
+            return
+        self.history.record()
+        for eq, p in moves.items():
+            eq.pos = p
+
     def nudge(self, eq, steps):
         if isinstance(eq, (Pump, Splitter)):
             eq.nudge(steps)
@@ -208,7 +222,7 @@ class PlayScene(Scene):
             title, button = f"CONTRACT {run.level} COMPLETE", "GO TO STORE"
             lines = [
                 "BASE PAY".ljust(32) + f"${pay.base:>7,.0f}",
-                f"PURITY BONUS ({pay.avg_purity:.1%} avg vs {c.purity:.0%})".ljust(32) + f"+${pay.purity_bonus:>6,.0f}",
+                f"PURITY BONUS ({pay.avg_purity:.1%} avg)".ljust(32) + f"+${pay.purity_bonus:>6,.0f}",
                 f"OFF-SPEC FEE ({run.offspec_total:,.0f} GAL)".ljust(32) + f"-${pay.offspec_fee:>6,.0f}",
                 f"SPILL FEE ({run.spill_total:,.0f} GAL)".ljust(32) + f"-${pay.spill_fee:>6,.0f}",
                 "PAID".ljust(32) + f"${pay.total:>7,}",
@@ -217,7 +231,9 @@ class PlayScene(Scene):
             self.running = False
             return
         lines = [
-            f"ON-SPEC {c.species}   {c.delivered(run.product):,.0f} / {c.quantity_gal:,.0f} GAL",
+            f"ON-SPEC {o.species} (>={o.purity:.0%})  {o.delivered(out):,.0f} / {o.quantity_gal:,.0f} GAL"
+            for o, out in zip(c.orders, run.products)
+        ] + [
             f"OFF-SPEC REJECTED  {run.offspec_total:,.0f} GAL",
             f"SPILLED            {run.spill_total:,.0f} GAL",
         ]
@@ -280,6 +296,8 @@ class PlayScene(Scene):
                 self.toggle_run()
             elif event.key == pygame.K_f:
                 self.cycle_speed()
+            elif event.key == pygame.K_t:
+                self.tidy_up()
             elif event.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
                 target = self.selected
                 if target is None and self.in_canvas(self.mouse):
@@ -350,7 +368,7 @@ class PlayScene(Scene):
         if pipe:
             self.history.record()
             self.net.disconnect(pipe)
-            self.pipe_memory.pop(pipe, None)
+            pipe.empty()
 
     def on_motion(self, pos):
         if self.slider:
@@ -417,12 +435,11 @@ class PlayScene(Scene):
     # -- drawing -----------------------------------------------------------
 
     def pipe_color(self, pipe):
-        color = widgets.blend(pipe.carried)
-        if color:
-            self.pipe_memory[pipe] = color
-            return color
-        old = self.pipe_memory.get(pipe)
-        return widgets.mix(old, theme.PIPE_EMPTY, 0.5) if old else None
+        """Overall color of what a pipe holds (or last carried, for a pipe with no holdup)."""
+        held = Stream()
+        for slug in pipe.slugs:
+            held.add(slug)
+        return widgets.blend(held) or widgets.blend(pipe.carried)
 
     def draw(self, surface):
         self.controls = []
@@ -431,24 +448,21 @@ class PlayScene(Scene):
         self.draw_legend(surface)
 
         net = self.net
-        routes = route_pipes(net.pipes)
+        routes = route_pipes(net.pipes, net.equipment)
         hovered = self.hovered_pipe()
         colors = {pipe: self.pipe_color(pipe) for pipe in net.pipes}
         flowing = self.running and net.last_dt > 0
         for pipe, (path, _hops) in routes.items():
             gpm = pipe.carried.total() * 60 / net.last_dt if flowing else 0.0
-            widgets.draw_pipe(surface, path, colors[pipe], gpm, self.t, pipe is hovered)
+            widgets.draw_pipe(surface, path, widgets.pipe_fill(pipe), gpm, self.t, pipe is hovered)
         for pipe, (_path, hops) in routes.items():  # jumps go on top of the pipes they cross
             for arc in hops:
                 widgets.draw_hop(surface, arc, colors[pipe], pipe is hovered)
         for eq in net.equipment:
             hot = self.pending if self.pending and self.pending.equipment is eq else None
-            fill = None
-            if isinstance(eq, Reactor):
-                out = net.pipe_at(Port(eq, "out"))
-                fill = self.pipe_color(out) if out else None
-            spec = self.run.contract.spec if eq is self.run.product else None
-            widgets.draw_equipment(surface, self.font, eq, highlight=hot, selected=eq is self.selected, fill=fill, spec=spec)
+            spec = eq.spec if isinstance(eq, Outlet) else None
+            widgets.draw_equipment(surface, self.font, eq, highlight=hot, selected=eq is self.selected, spec=spec)
+        self.draw_spills(surface)
         if self.pending:
             pygame.draw.line(surface, theme.PORT_HOT, port_pos(self.pending), self.mouse, 2)
 
@@ -464,21 +478,66 @@ class PlayScene(Scene):
         elif not self.drag and not self.slider:
             hover = self.equipment_at(self.mouse) if self.in_canvas(self.mouse) else self.card_at(self.mouse)
             if hover and hover is not self.selected:
-                widgets.draw_tooltip(surface, self.font, self.mouse, widgets.details(hover))
+                lines = widgets.details(hover)
+                spilled = net.spilled_by(hover) if hover in net.equipment else 0.0
+                if spilled > 0.5:
+                    lines = [*lines, f"SPILLED HERE {spilled:,.0f} GAL"]
+                widgets.draw_tooltip(surface, self.font, self.mouse, lines)
             elif hovered:
                 lines = widgets.pipe_details(hovered, net.last_dt, self.running)
                 widgets.draw_tooltip(surface, self.font, self.mouse, lines)
+
+    def draw_spills(self, surface):
+        """Alarm wherever liquid spilled last step: a red drip and readout at an open outlet, a
+        flashing red frame and readout on a full tank, stopped pump or tank-less loop."""
+        net = self.net
+        if net.last_dt <= 0:
+            return
+        flash = int(self.t * 3) % 2 == 0
+        for key, stream in net.spills.items():
+            gpm = stream.total() * 60 / net.last_dt
+            if isinstance(key, Port):
+                if key.equipment not in net.equipment or net.pipe_at(key):
+                    continue  # piped up since
+                x, y = port_pos(key)
+                color = widgets.blend(stream) or theme.ALARM
+                for i in range(4):  # drops falling from the open outlet into a puddle
+                    k = (self.t * 1.4 + i / 4) % 1.0
+                    pygame.draw.circle(surface, color, (x + 4 + 6 * k, y + 6 + 34 * k * k), 4.5 - 1.5 * k)
+                puddle = pygame.Rect(0, 0, 30 + 4 * math.sin(self.t * 4), 8)
+                puddle.center = (x + 10, y + 42)
+                pygame.draw.ellipse(surface, color, puddle)
+                pygame.draw.ellipse(surface, theme.ALARM, puddle, 1)
+                pygame.draw.circle(surface, theme.ALARM, (x, y), PORT_RADIUS + 3, 2)
+                widgets.draw_value_box(surface, self.font, (x + 58, y + 8), f"SPILL {gpm:,.0f} GPM", theme.ALARM, theme.ALARM)
+            else:
+                if key not in net.equipment:
+                    continue
+                rect = rect_of(key)
+                if flash:
+                    pygame.draw.rect(surface, theme.ALARM, rect.inflate(12, 12), 2)
+                # Below the unit's readouts, or above its tag when that would run off the canvas.
+                y = rect.bottom + 54 if rect.bottom + 82 < CANVAS_BOTTOM else rect.top - 70
+                widgets.draw_value_box(surface, self.font, (rect.centerx, y), f"SPILL {gpm:,.0f} GPM", theme.ALARM, theme.ALARM)
+                widgets.draw_text(surface, self.font, (rect.centerx, y + 18), net.spill_reason(key), theme.ALARM)
 
     def draw_header(self, surface):
         run, c = self.run, self.run.contract
         pygame.draw.rect(surface, theme.PANEL, (0, 0, W, CANVAS_TOP))
         pygame.draw.line(surface, theme.PANEL_EDGE, (0, CANVAS_TOP - 1), (W, CANVAS_TOP - 1))
         widgets.draw_text(surface, self.mid, (14, CANVAS_TOP // 2), f"CONTRACT {run.level}", theme.TAG_TEXT, "midleft")
-        widgets.draw_text(surface, self.font, (130, CANVAS_TOP // 2), f"MAKE {c.summary}", theme.TEXT, "midleft")
-        bar = pygame.Rect(470, 12, 220, 16)
-        done = c.delivered(run.product)
-        widgets.draw_bar(surface, bar, done / c.quantity_gal, theme.SPECIES.get(c.species, theme.OK))
-        widgets.draw_text(surface, self.font, (bar.right + 8, bar.centery), f"{done:,.0f}/{c.quantity_gal:,.0f}", theme.VALUE_TEXT, "midleft")
+        # One block per order: product and purity spec, progress bar, gallons on-spec so far.
+        x = 130
+        width = 250 if len(c.orders) > 1 else 420
+        for order, outlet in zip(c.orders, run.products):
+            color = theme.SPECIES.get(order.species, theme.OK)
+            label = widgets.draw_text(surface, self.mid, (x, CANVAS_TOP // 2), f"{order.species} {order.purity:.0%}+", color, "midleft")
+            done = order.delivered(outlet)
+            bar = pygame.Rect(label.right + 8, 13, width - (label.width + 8) - 92, 14)
+            widgets.draw_bar(surface, bar, done / order.quantity_gal, color)
+            text = theme.OK if done >= order.quantity_gal else theme.VALUE_TEXT
+            widgets.draw_text(surface, self.font, (bar.right + 6, bar.centery), f"{done:,.0f}/{order.quantity_gal:,.0f}", text, "midleft")
+            x += width
         rej, spill = run.offspec_total, run.spill_total
         cash = widgets.draw_text(surface, self.mid, (W - 14, CANVAS_TOP // 2), f"${run.money:,}", theme.WARN, "midright")
         est = run.preview_payout().total
@@ -588,6 +647,7 @@ class PlayScene(Scene):
             ),
             ("UNDO ^Z", self.undo, theme.KEY if self.history.undo_stack else theme.KEY_DISABLED, 80),
             ("REDO ^Y", self.redo, theme.KEY if self.history.redo_stack else theme.KEY_DISABLED, 80),
+            ("TIDY  [T]", self.tidy_up, theme.KEY, 90),
         ]
         for label, action, fill, width in keys:
             rect = pygame.Rect(x, top + 6, width, H - top - 12)
@@ -601,8 +661,7 @@ class PlayScene(Scene):
 
     def draw_legend(self, surface):
         reactions = self.run.chem.known(self.run.level)
-        height = 48 + 18 * len(reactions)
-        rect = pygame.Rect(10, CANVAS_BOTTOM - height - 10, 240, height)
+        rect = self.legend_rect()
         widgets.draw_frame(surface, self.font, rect, "REACTIONS")
         for i, reaction in enumerate(reactions):
             widgets.draw_text(surface, self.font, (rect.x + 10, rect.y + 26 + i * 18), reaction.label, theme.TEXT, "topleft")

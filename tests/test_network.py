@@ -260,3 +260,130 @@ def test_recycle_through_tank_beats_single_pass():
     assert single.received["B"] == pytest.approx(500)
     assert product.received["B"] > 990
     assert product.received.total() + tank.volume_gal + net.spilled_gal == pytest.approx(1000)
+
+
+def test_streams_from_different_pumps_mix_before_reacting():
+    """Pure Z and pure K from two pumps meet at a mixer; the K+Z reactor must see them together."""
+    tz, tk = Tank("TZ", capacity_gal=5000), Tank("TK", capacity_gal=5000)
+    tz.content = Stream(Z=1000.0)
+    tk.content = Stream(K=1000.0)
+    pz, pk = fixed_pump("PZ", 60), fixed_pump("PK", 60)
+    mix, boost = Mixer("M"), fixed_pump("PB", 60)
+    reactor = Reactor("R", reaction=parse("K+Z>T"), conversion=0.5, rated_gpm=500)
+    out = Outlet("O")
+    net = build(tz, tk, pz, pk, mix, boost, reactor, out)
+    link(net, tz, pz)
+    link(net, tk, pk)
+    link(net, pz, mix, into=0)
+    link(net, pk, mix, into=1)
+    link(net, mix, boost)
+    link(net, boost, reactor)
+    link(net, reactor, out)
+    net.step(1)  # 1 gal of each
+    assert out.received["T"] == pytest.approx(0.5)
+    assert out.received["Z"] == pytest.approx(0.5)
+    assert reactor.load_gpm == pytest.approx(120)  # both pumps' flow counts toward the rating
+    assert boost.flow_gpm == pytest.approx(120)
+
+
+# -- holdup: pipes and reactors take time to fill ------------------------------
+
+
+def test_pipe_is_plug_flow():
+    a, b = fixed_pump("A"), fixed_pump("B")
+    a.pos, b.pos = (0, 0), (100, 0)
+    net = build(a, b)
+    pipe = link(net, a, b)
+    cap = pipe.capacity_gal
+    assert cap > 0
+    first = pipe.push(Stream(A=cap * 0.6))
+    assert first.total() == 0 and pipe.fill == pytest.approx(0.6)
+    out = pipe.push(Stream(B=cap * 0.6))  # fills it; 0.2 of the A leaves the far end first
+    assert out["A"] == pytest.approx(cap * 0.2) and "B" not in out
+    out = pipe.push(Stream(B=cap * 0.5))  # rest of the A, then some B
+    assert out["A"] == pytest.approx(cap * 0.4) and out["B"] == pytest.approx(cap * 0.1)
+
+
+def test_placed_plant_takes_time_to_deliver():
+    src, pump, out = feed(), fixed_pump("P", 60), Outlet("O")
+    src.pos, pump.pos, out.pos = (0, 0), (200, 0), (400, 0)
+    net = build(src, pump, out)
+    link(net, src, pump)
+    link(net, pump, out)
+    hold = sum(p.capacity_gal for p in net.pipes)
+    net.step(hold * 60 / 60 * 0.9)  # not enough to fill both pipes
+    assert out.received.total() == 0
+    for _ in range(10):
+        net.step(1)
+    assert out.received.total() > 0
+
+
+def test_reactor_holds_liquid_then_overflows_at_listed_conversion():
+    src, pump, out = feed(10_000), fixed_pump("P", 60), Outlet("O")
+    reactor = Reactor("R", reaction=parse("A>B"), conversion=0.6, rated_gpm=500, volume_gal=100)
+    net = build(src, pump, reactor, out)
+    link(net, src, pump)
+    link(net, pump, reactor)
+    link(net, reactor, out)
+    for _ in range(90):  # 90 gal in at 1 gal/s
+        net.step(1)
+    assert out.received.total() == 0 and reactor.level == pytest.approx(0.9)
+    for _ in range(1000):
+        net.step(1)
+    out.reset()
+    net.step(1)
+    assert out.inflow.total() == pytest.approx(1)
+    assert out.inflow["B"] == pytest.approx(0.6, abs=0.02)
+
+
+def test_reactants_arriving_at_different_times_still_react_in_the_vessel():
+    reactor = Reactor("R", reaction=parse("K+Z>T"), conversion=0.8, rated_gpm=500, volume_gal=100)
+    reactor.run(Stream(Z=50.0), 60, 1)
+    reactor.run(Stream(K=50.0), 60, 1)
+    for _ in range(20):
+        reactor.run(Stream(), 60, 1)  # keeps reacting while stirred at that rate
+    assert reactor.content.get("T", 0) > 5
+
+
+def test_restart_empties_pipes_and_reactors():
+    from goop_sim.run.state import RunState
+
+    run = RunState(seed=3)
+    reactor = next(eq for eq in run.inventory if isinstance(eq, Reactor))
+    run.inventory.remove(reactor)
+    reactor.pos = (300, 300)
+    run.net.add(reactor)
+    run.feed.pos = (80, 300)
+    pipe = run.net.connect(Port(run.feed, "out"), Port(reactor, "in"))
+    pipe.push(Stream(A=5.0))
+    reactor.content = Stream(A=50.0)
+    run.restart()
+    assert pipe.held_gal == 0 and reactor.content.total() == 0
+
+
+def test_spills_are_tracked_where_they_happen():
+    src, pump, col, stopped = feed(), fixed_pump("P", 60), Separator("C", top={"A": 0.5}), fixed_pump("S", running=False)
+    net = build(src, pump, col, stopped)
+    link(net, src, pump)
+    link(net, pump, col)
+    link(net, col, stopped, out=1)  # top left open; bottom into a stopped pump
+    net.step(1)
+    top = Port(col, "out", 0)
+    assert net.spills[top].total() == pytest.approx(0.5)
+    assert net.spills[stopped].total() == pytest.approx(0.5)
+    assert net.spill_reason(top) == "OUTLET NOT PIPED" and net.spill_reason(stopped) == "PUMP STOPPED"
+    assert net.spilled_by(col) == pytest.approx(0.5) and net.spilled_gal == pytest.approx(1)
+    net.step(1)
+    assert net.spilled_by(col) == pytest.approx(1.0)  # totals accumulate; last-step dict is fresh
+    net.clear_spills()
+    assert net.spilled_gal == 0 and not net.spills and not net.spill_totals
+
+
+def test_full_tank_spill_is_on_the_tank():
+    src, pump, tank = feed(), fixed_pump("P", 60), Tank("T", capacity_gal=0.4)
+    net = build(src, pump, tank)
+    link(net, src, pump)
+    link(net, pump, tank)
+    net.step(1)
+    assert net.spills[tank].total() == pytest.approx(0.6)
+    assert net.spill_reason(tank) == "TANK FULL"

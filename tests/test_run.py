@@ -27,23 +27,30 @@ def test_each_step_builds_on_what_the_plant_already_makes():
         chem = generate_chemistry(random.Random(seed))
         assert sum(chem.feed.values()) == pytest.approx(1.0)
         known = list(chem.feed)
+        made = []
         for level, reaction in enumerate(chem.chain, start=1):
             assert set(reaction.reactants) <= set(known)
             if level > 1:
-                assert known[-1] in reaction.reactants  # newest product is always used
+                assert set(reaction.reactants) & set(made)  # uses something the plant already makes
             target = chem.target(level)
             assert target not in known and target != chem.waste
             known.append(target)
+            made.append(target)
+        assert len({frozenset(r.reactants) for r in chem.chain}) == len(chem.chain)
         assert chem.waste not in chem.species
         assert chem.target(len(chem.chain) + 3) == chem.target(len(chem.chain))
 
 
-def test_runs_get_different_chemistry():
-    chains = {tuple(r.label for r in generate_chemistry(random.Random(s)).chain) for s in SEEDS}
-    feeds = {tuple(generate_chemistry(random.Random(s)).feed) for s in SEEDS}
+def test_letters_are_fixed_and_stoichiometry_varies():
+    chems = [generate_chemistry(random.Random(s)) for s in SEEDS]
+    for chem in chems:
+        assert chem.waste == "W"
+        assert "".join(chem.species) == "ABCDEFGH"[: len(chem.species)]  # A (B) feed, then C, D, ... in unlock order
+    chains = {tuple(r.label for r in chem.chain) for chem in chems}
     assert len(chains) > 50  # nearly every run is different
-    assert len(feeds) > 30  # feed species vary too
-    assert any(len(f) == 2 for f in feeds) and any(len(f) == 1 for f in feeds)
+    coefficients = {c for chem in chems for r in chem.chain for c in r.reactants.values()}
+    assert coefficients == {1, 2, 3}
+    assert any(len(c.feed) == 2 for c in chems) and any(len(c.feed) == 1 for c in chems)
 
 
 def test_feed_per_gal_follows_stoichiometry():
@@ -131,30 +138,55 @@ def test_grant_and_shop_only_use_known_reactions():
 # -- contracts and money --------------------------------------------------------------
 
 
+def deliver_all(run):
+    for outlet, order in zip(run.products, run.contract.orders):
+        outlet.take_in(Stream({order.species: order.quantity_gal}))
+
+
 def test_contracts_escalate_and_stay_achievable():
     for seed in range(20):
         rng = random.Random(seed)
         chem = generate_chemistry(rng)
-        contracts = [make_contract(level, chem, rng) for level in range(1, 7)]
-        assert [c.species for c in contracts[:3]] == [chem.target(1), chem.target(2), chem.target(3)]
-        assert contracts[5].purity > contracts[2].purity
-        assert contracts[5].feed.get(chem.waste, 0) > 0 and contracts[0].feed.get(chem.waste, 0) == 0
-        assert contracts[5].base_pay > contracts[0].base_pay
+        contracts = [make_contract(level, chem, rng) for level in range(1, 8)]
+        assert [c.orders[0].species for c in contracts[:4]] == [chem.target(n) for n in range(1, 5)]
+        assert contracts[6].orders[0].purity > contracts[3].orders[0].purity
+        assert contracts[6].feed.get(chem.waste, 0) > 0 and contracts[0].feed.get(chem.waste, 0) == 0
+        assert contracts[6].base_pay > contracts[0].base_pay
+        assert len(contracts[0].orders) == 1 and len(contracts[2].orders) == 2
         for c in contracts:
-            max_yield = c.feed.total() / chem.feed_per_gal(c.species)
-            assert c.quantity_gal <= MAX_YIELD_SHARE * max_yield * 1.1 + 100
+            species = [o.species for o in c.orders]
+            assert len(set(species)) == len(species)
+            assert all(s in chem.species[len(chem.feed) :] for s in species)  # only products, never feed or waste
+            cost = sum(o.quantity_gal * chem.feed_per_gal(o.species) for o in c.orders)
+            rounding = sum(50 * chem.feed_per_gal(o.species) for o in c.orders)  # quantities round to 100 gal
+            assert cost <= MAX_YIELD_SHARE * c.feed.total() * 1.1 + rounding
 
 
 def test_contract_counts_only_on_spec_product():
     contract = make_contract(1, generate_chemistry(random.Random(0)), random.Random(0))
-    sp, qty = contract.species, contract.quantity_gal
-    out = Outlet("O", spec=contract.spec)
+    order = contract.orders[0]
+    sp, qty = order.species, order.quantity_gal
+    out = Outlet("O", spec=order.spec)
     out.take_in(Stream({sp: qty, "zz": qty}))  # 50% pure: rejected
-    assert not contract.check(out)
+    assert not contract.check([out])
     out.take_in(Stream({sp: qty - 1}))
-    assert not contract.check(out)
+    assert not contract.check([out])
     out.take_in(Stream({sp: 1}))
-    assert contract.check(out)
+    assert contract.check([out])
+
+
+def test_multi_product_contract_needs_every_order():
+    chem = generate_chemistry(random.Random(0))
+    contract = make_contract(3, chem, random.Random(0))
+    assert len(contract.orders) == 2
+    outs = [Outlet(f"O{i}", spec=o.spec) for i, o in enumerate(contract.orders)]
+    first, second = contract.orders
+    outs[0].take_in(Stream({first.species: first.quantity_gal}))
+    assert not contract.check(outs)
+    outs[1].take_in(Stream({first.species: second.quantity_gal}))  # wrong product at the second outlet
+    assert not contract.check(outs)
+    outs[1].take_in(Stream({second.species: second.quantity_gal}))
+    assert contract.check(outs)
 
 
 def test_outlet_tracks_average_purity_of_accepted_product():
@@ -167,22 +199,36 @@ def test_outlet_tracks_average_purity_of_accepted_product():
 
 def test_payout_rewards_purity_not_quantity_and_charges_waste():
     contract = make_contract(1, generate_chemistry(random.Random(0)), random.Random(0))
-    at_spec = settle(contract, contract.purity, 0, 0)
-    purer = settle(contract, (contract.purity + 1) / 2, 0, 0)
-    perfect = settle(contract, 1.0, 0, 0)
+    spec = contract.orders[0].purity
+    at_spec = settle(contract, [spec], 0, 0)
+    purer = settle(contract, [(spec + 1) / 2], 0, 0)
+    perfect = settle(contract, [1.0], 0, 0)
     assert at_spec.total == contract.base_pay
     assert at_spec.total < purer.total < perfect.total
-    sloppy = settle(contract, contract.purity, 2000, 500)
+    sloppy = settle(contract, [spec], 2000, 500)
     assert sloppy.total < at_spec.total
-    assert settle(contract, contract.purity, 1e9, 1e9).total == round(contract.base_pay * 0.2)
+    assert settle(contract, [spec], 1e9, 1e9).total == round(contract.base_pay * 0.2)
+
+
+def test_multi_order_bonus_is_weighted_by_size():
+    contract = make_contract(3, generate_chemistry(random.Random(0)), random.Random(0))
+    big, small = sorted(contract.orders, key=lambda o: -o.quantity_gal)
+    i_big, i_small = contract.orders.index(big), contract.orders.index(small)
+    purities = [o.purity for o in contract.orders]
+    purities[i_big] = 1.0
+    bonus_big = settle(contract, purities, 0, 0).purity_bonus
+    purities = [o.purity for o in contract.orders]
+    purities[i_small] = 1.0
+    bonus_small = settle(contract, purities, 0, 0).purity_bonus
+    assert bonus_big > bonus_small > 0
 
 
 def test_run_meets_contract_and_gets_paid():
     run = RunState(seed=1)
     assert run.money == START_MONEY
-    assert run.product.spec == run.contract.spec
+    assert run.product.spec == run.contract.orders[0].spec
     assert not run.met
-    run.product.take_in(Stream({run.contract.species: run.contract.quantity_gal}))
+    deliver_all(run)
     assert run.met
     payout = run.complete_contract()
     assert payout.purity_bonus > 0  # 100% pure product
@@ -215,7 +261,7 @@ def test_restarts_restock_and_run_out():
 
 def test_buying_and_rerolling():
     run = RunState(seed=4)
-    run.product.take_in(Stream({run.contract.species: run.contract.quantity_gal}))
+    deliver_all(run)
     run.complete_contract()
     run.money = 10_000
     item = run.offers[0]
@@ -242,7 +288,7 @@ def test_advance_keeps_the_plant_and_restocks():
     pump.set_setpoint(pump.max_gpm)
     run.net.add(pump)
     run.feed.stock.take(5000)
-    run.product.take_in(Stream({run.contract.species: run.contract.quantity_gal}))
+    deliver_all(run)
     run.complete_contract()
     money = run.money
 
@@ -255,7 +301,23 @@ def test_advance_keeps_the_plant_and_restocks():
     assert all(e in run.inventory for e in grant)
     assert run.money == money
     assert run.product.received.total() == 0
-    assert run.product.spec == run.contract.spec
+    assert run.product.spec == run.contract.orders[0].spec
     assert run.feed.stock.total() == pytest.approx(run.contract.feed.total())
     assert run.restarts_left == RESTARTS
     assert run.offspec_total == 0
+
+
+def test_product_outlets_are_added_as_contracts_grow():
+    run = RunState(seed=5)
+    assert len(run.products) == 1 and run.product.name == "PRODUCT"
+    for _ in range(4):
+        deliver_all(run)
+        run.complete_contract()
+        nxt = run.next_contract
+        assert len(nxt.orders) >= len(run.products)  # never fewer orders than outlets already built
+        run.advance(run.next_grant())
+        assert run.contract is nxt
+        assert len(run.products) == len(run.contract.orders)
+        assert all(o in run.net.equipment for o in run.products)
+        assert [o.spec for o in run.products] == [order.spec for order in run.contract.orders]
+    assert len(run.products) >= 2 and run.products[1].name == "PRODUCT 2"
