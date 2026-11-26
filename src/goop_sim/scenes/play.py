@@ -65,6 +65,7 @@ class PlayScene(Scene):
         self.controls = []  # (rect, on_click, on_drag) rebuilt every draw
         self.pipe_memory = {}  # last color seen in each pipe, so idle pipes stay tinted
         self.history = History(run)  # undo/redo of layout edits (Ctrl+Z / Ctrl+Y)
+        theme.set_species(run.chem.species, run.chem.waste)
         self.grid = self._make_grid()
         self.place_fixtures()
 
@@ -202,15 +203,25 @@ class PlayScene(Scene):
 
     def show_result(self, kind):
         run, c = self.run, self.run.contract
+        if kind == "met":
+            pay = run.complete_contract()
+            title, button = f"CONTRACT {run.level} COMPLETE", "GO TO STORE"
+            lines = [
+                "BASE PAY".ljust(32) + f"${pay.base:>7,.0f}",
+                f"PURITY BONUS ({pay.avg_purity:.1%} avg vs {c.purity:.0%})".ljust(32) + f"+${pay.purity_bonus:>6,.0f}",
+                f"OFF-SPEC FEE ({run.offspec_total:,.0f} GAL)".ljust(32) + f"-${pay.offspec_fee:>6,.0f}",
+                f"SPILL FEE ({run.spill_total:,.0f} GAL)".ljust(32) + f"-${pay.spill_fee:>6,.0f}",
+                "PAID".ljust(32) + f"${pay.total:>7,}",
+            ]
+            self.result = {"kind": kind, "title": title, "lines": lines, "button": button}
+            self.running = False
+            return
         lines = [
             f"ON-SPEC {c.species}   {c.delivered(run.product):,.0f} / {c.quantity_gal:,.0f} GAL",
-            f"OFF-SPEC REJECTED  {run.product.rejected_gal:,.0f} GAL",
-            f"SPILLED            {self.net.spilled_gal:,.0f} GAL",
+            f"OFF-SPEC REJECTED  {run.offspec_total:,.0f} GAL",
+            f"SPILLED            {run.spill_total:,.0f} GAL",
         ]
-        if kind == "met":
-            title, button = f"CONTRACT {run.level} COMPLETE", "PICK NEW EQUIPMENT"
-            lines.append(f"FEED LEFT          {run.feed.stock.total():,.0f} GAL")
-        elif run.restarts_left > 0:
+        if run.restarts_left > 0:
             title, button = "OUT OF FEED", f"RESTART CONTRACT ({run.restarts_left} LEFT)"
             lines.append("Restart restocks feed and empties the plant.")
         else:
@@ -221,9 +232,9 @@ class PlayScene(Scene):
 
     def on_continue(self):
         if self.result["kind"] == "met":
-            from goop_sim.scenes.draft import DraftScene
+            from goop_sim.scenes.store import StoreScene
 
-            self.game.change_scene(DraftScene(self.game, self.run))
+            self.game.change_scene(StoreScene(self.game, self.run))
         elif self.run.restarts_left > 0:
             self.restart()
         else:
@@ -468,10 +479,12 @@ class PlayScene(Scene):
         done = c.delivered(run.product)
         widgets.draw_bar(surface, bar, done / c.quantity_gal, theme.SPECIES.get(c.species, theme.OK))
         widgets.draw_text(surface, self.font, (bar.right + 8, bar.centery), f"{done:,.0f}/{c.quantity_gal:,.0f}", theme.VALUE_TEXT, "midleft")
-        rej, spill = run.product.rejected_gal, self.net.spilled_gal
-        right = f"FEED {run.feed.stock.total():,.0f}   OFF-SPEC {rej:,.0f}   SPILL {spill:,.0f}"
-        color = theme.WARN if rej > 0.5 or spill > 0.5 else theme.TEXT
-        widgets.draw_text(surface, self.font, (W - 14, CANVAS_TOP // 2), right, color, "midright")
+        rej, spill = run.offspec_total, run.spill_total
+        cash = widgets.draw_text(surface, self.mid, (W - 14, CANVAS_TOP // 2), f"${run.money:,}", theme.WARN, "midright")
+        est = run.preview_payout().total
+        waste = f"OFF-SPEC {rej:,.0f}  SPILL {spill:,.0f}  EST PAY ${est:,}"
+        color = theme.ALARM if rej > 0.5 or spill > 0.5 else theme.TEXT
+        widgets.draw_text(surface, self.font, (cash.left - 18, CANVAS_TOP // 2), waste, color, "midright")
 
     def draw_panel(self, surface):
         pygame.draw.rect(surface, theme.PANEL, (CANVAS_RIGHT, CANVAS_TOP, theme.PANEL_WIDTH, CANVAS_BOTTOM - CANVAS_TOP))
@@ -589,7 +602,7 @@ class PlayScene(Scene):
     def draw_legend(self, surface):
         reactions = self.run.chem.known(self.run.level)
         height = 48 + 18 * len(reactions)
-        rect = pygame.Rect(10, CANVAS_BOTTOM - height - 10, 190, height)
+        rect = pygame.Rect(10, CANVAS_BOTTOM - height - 10, 240, height)
         widgets.draw_frame(surface, self.font, rect, "REACTIONS")
         for i, reaction in enumerate(reactions):
             widgets.draw_text(surface, self.font, (rect.x + 10, rect.y + 26 + i * 18), reaction.label, theme.TEXT, "topleft")
@@ -597,7 +610,8 @@ class PlayScene(Scene):
         for species, color in theme.SPECIES.items():
             chip = pygame.Rect(x, rect.bottom - 20, 12, 12)
             pygame.draw.rect(surface, color, chip)
-            widgets.draw_text(surface, self.font, (chip.right + 4, chip.centery), species, theme.TEXT, "midleft")
+            label = f"{species} WASTE" if species == self.run.chem.waste else species
+            widgets.draw_text(surface, self.font, (chip.right + 4, chip.centery), label, theme.TEXT, "midleft")
             x += 35
 
     def draw_result(self, surface):

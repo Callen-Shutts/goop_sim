@@ -169,7 +169,7 @@ def draw_body(surface, eq: Equipment, rect: pygame.Rect, font=None, fill=None):
             pygame.draw.rect(surface, color, level)
             pygame.draw.line(surface, mix(color, (255, 255, 255), 0.5), level.topleft, (level.right - 1, level.top))
         elif small:
-            pygame.draw.rect(surface, theme.SPECIES["A"], (glass.x, glass.centery, glass.width, glass.height // 2))
+            pygame.draw.rect(surface, theme.PALETTE[0], (glass.x, glass.centery, glass.width, glass.height // 2))
         pygame.draw.rect(surface, theme.OUTLINE, glass, 1)
     elif isinstance(eq, Pump):
         r = min(rect.width, rect.height) // 2

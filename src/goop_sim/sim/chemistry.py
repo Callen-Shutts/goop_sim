@@ -1,22 +1,14 @@
-"""Species and reactions. Each run rolls its own reaction chain from templates."""
+"""Species and reactions. Every run rolls its own species names, feed and reaction chain."""
 
 import random
 from dataclasses import dataclass
 
 from goop_sim.sim.stream import Stream
 
-SPECIES = "ABCDE"
-FEED_SPECIES = "A"
-WASTE_SPECIES = "E"  # side reactions make this; never a contract target
-
-# Templates for each step of the chain. "A+B>C" means 1 gal A + 1 gal B -> 1 gal C.
-# Each step's product is the next contract's target, and it is always made from species
-# the plant already handles, so a plant built for one contract can be extended for the next.
-STEP_TEMPLATES = [
-    ["A>B", "2A>B"],
-    ["B>C", "A+B>C", "2B>C"],
-    ["C>D", "B+C>D", "A+C>D"],
-]
+# Species are single letters, picked fresh each run (I and O left out: they read like 1 and 0).
+LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+CHAIN_LENGTH = 3
+TWO_FEED_CHANCE = 0.4
 
 
 @dataclass(eq=False)
@@ -59,7 +51,28 @@ def parse(spec: str) -> Reaction:
 
 @dataclass(eq=False)
 class Chemistry:
+    """One run's chemistry.
+
+    `feed` is the raw material's composition (fractions summing to 1; one or two species).
+    `chain[n]` makes the product contract n+1 asks for, from species the plant already has.
+    `waste` is what side reactions make; never a target.
+    """
+
     chain: list[Reaction]
+    feed: dict[str, float]
+    waste: str
+
+    @property
+    def species(self) -> list[str]:
+        """Feed species, then each chain product in order. Excludes waste."""
+        out = list(self.feed)
+        for reaction in self.chain:
+            out += [s for s in reaction.products if s not in out]
+        return out
+
+    @property
+    def all_species(self) -> list[str]:
+        return self.species + [self.waste]
 
     def target(self, level: int) -> str:
         """Species a contract at `level` asks for. Past the end of the chain it stays on the last one."""
@@ -69,12 +82,49 @@ class Chemistry:
     def known(self, level: int) -> list[Reaction]:
         return self.chain[: min(level, len(self.chain))]
 
+    def feed_per_gal(self, species: str) -> float:
+        """Rough gallons of feed stream needed per gallon of `species` at 100% conversion.
+
+        Conservative (adds up every reactant's cost as if made separately); used to keep
+        contract sizes achievable for whatever chain was rolled.
+        """
+        if species in self.feed:
+            return 1.0 / self.feed[species]
+        for reaction in self.chain:
+            if species in reaction.products:
+                made = reaction.products[species]
+                return sum(c * self.feed_per_gal(s) for s, c in reaction.reactants.items()) / made
+        raise KeyError(species)
+
 
 def generate_chemistry(rng: random.Random) -> Chemistry:
-    return Chemistry([parse(rng.choice(options)) for options in STEP_TEMPLATES])
+    names = rng.sample(LETTERS, CHAIN_LENGTH + 3)
+    waste = names.pop()
+    if rng.random() < TWO_FEED_CHANCE:
+        major = rng.choice([0.5, 0.6, 0.7])
+        feed = {names[0]: major, names[1]: round(1 - major, 2)}
+        products = names[2 : 2 + CHAIN_LENGTH]
+    else:
+        feed = {names[0]: 1.0}
+        products = names[1 : 1 + CHAIN_LENGTH]
+
+    known = list(feed)
+    chain = []
+    for step, product in enumerate(products):
+        # The newest species always takes part, so each contract builds on the last one's product.
+        anchor = known[-1] if step else rng.choice(list(feed))
+        reactants = {anchor: rng.choice([1, 1, 2])}
+        others = [s for s in known if s != anchor]
+        if step == 0 and len(feed) == 2 and rng.random() < 0.6:
+            reactants[others[0]] = 1  # the two feeds combine
+        elif others and rng.random() < 0.5:
+            reactants[rng.choice(others)] = 1
+        chain.append(Reaction(reactants, {product: 1}))
+        known.append(product)
+    return Chemistry(chain, feed, waste)
 
 
-def side_reaction_for(rng: random.Random, main: Reaction) -> Reaction:
+def side_reaction_for(rng: random.Random, main: Reaction, waste: str) -> Reaction:
     """A side reaction that degrades one of the main reaction's species into waste."""
     involved = sorted(set(main.reactants) | set(main.products))
-    return parse(f"{rng.choice(involved)}>{WASTE_SPECIES}")
+    return Reaction({rng.choice(involved): 1}, {waste: 1})

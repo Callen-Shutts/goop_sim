@@ -7,9 +7,10 @@ See `CLAUDE.md` and `docs/` for design, architecture and session logs.
 ## Concept
 
 A roguelike chemical-engineering game with an HMI/SCADA-style interface. Each run
-rolls a random reaction chain and deals random equipment (reactors, columns, splitters,
-mixers, pumps, tanks). Build a plant that turns the feed into each contract's product
-at the required purity, then keep extending it as contracts escalate.
+rolls new chemistry (species, feed, reaction chain) and deals random equipment (reactors,
+columns, splitters, mixers, pumps, tanks). Build a plant that turns the feed into each
+contract's product at the required purity, get paid (more for purer product, less for
+off-spec and spills), spend it in the store, and keep extending the plant.
 
 ## Controls
 
@@ -52,6 +53,6 @@ pytest
 - `src/goop_sim/content/` - what a run can deal you (random equipment)
 - `src/goop_sim/run/` - one roguelike run: contracts, attempts, progression
 - `src/goop_sim/ui/` - HMI look: theme and drawing widgets (tanks, pumps, value boxes)
-- `src/goop_sim/scenes/` - screens (play, draft)
+- `src/goop_sim/scenes/` - screens (play, store)
 - `src/goop_sim/game.py` - window, main loop, scene switching
 - `tests/` - pytest, mostly for `sim/`

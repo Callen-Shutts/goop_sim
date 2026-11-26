@@ -41,6 +41,7 @@ class Outlet(Equipment):
     spec: tuple[str, float] | None = None
     received: Stream = field(default_factory=Stream)
     accepted: Stream = field(default_factory=Stream)
+    accepted_volume: float = 0.0  # total gallons of the accepted streams (for average purity)
     rejected_gal: float = 0.0
     inflow: Stream = field(default_factory=Stream)  # arrived during the last step
 
@@ -51,12 +52,21 @@ class Outlet(Equipment):
             species, purity = self.spec
             if stream.fraction(species) >= purity - 1e-9:
                 self.accepted.add({species: stream.get(species, 0.0)})
+                self.accepted_volume += stream.total()
             else:
                 self.rejected_gal += stream.total()
+
+    @property
+    def accepted_purity(self) -> float:
+        """Average purity of everything accepted so far."""
+        if not self.spec or self.accepted_volume <= 0:
+            return 0.0
+        return self.accepted.get(self.spec[0], 0.0) / self.accepted_volume
 
     def reset(self) -> None:
         self.received = Stream()
         self.accepted = Stream()
+        self.accepted_volume = 0.0
         self.rejected_gal = 0.0
         self.inflow = Stream()
 

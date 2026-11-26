@@ -46,14 +46,29 @@ PORT_HOT = (245, 220, 40)
 OVERLAY_SHADE = (0, 0, 0, 150)
 
 # One color per species. Streams are drawn as the volume-weighted blend of these, so a stream
-# turns toward a species' color as it gets purer.
-SPECIES = {
-    "A": (50, 130, 255),  # blue feed
-    "B": (60, 230, 90),  # green
-    "C": (255, 160, 30),  # orange
-    "D": (225, 70, 255),  # magenta
-    "E": (140, 110, 80),  # brown waste
-}
+# turns toward a species' color as it gets purer. Species letters change every run, so colors are
+# handed out by role: feed species first (blue, green), then chain products, waste always brown.
+PALETTE = [
+    (50, 130, 255),  # blue
+    (60, 230, 90),  # green
+    (255, 160, 30),  # orange
+    (225, 70, 255),  # magenta
+    (40, 225, 225),  # cyan
+    (245, 225, 60),  # yellow
+]
+WASTE_COLOR = (140, 110, 80)  # brown
+SPECIES: dict[str, tuple[int, int, int]] = {}  # current run's species -> color, in display order
+
+
+def set_species(order, waste) -> None:
+    """Point the shared species color table at this run's chemistry (mutated in place)."""
+    SPECIES.clear()
+    for i, species in enumerate(order):
+        SPECIES[species] = PALETTE[i % len(PALETTE)]
+    SPECIES[waste] = WASTE_COLOR
+
+
+set_species("ABCD", "E")
 
 TOOLBAR_HEIGHT = 40
 BOTTOM_BAR = 48
