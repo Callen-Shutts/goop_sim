@@ -1,7 +1,7 @@
-import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-GAL_PER_FT3 = 7.48052
+from goop_sim.sim.chemistry import Reaction
+from goop_sim.sim.stream import Stream
 
 
 @dataclass(eq=False)
@@ -14,48 +14,113 @@ class Equipment:
     pos: tuple[int, int] | None = None
     fixed: bool = False
 
+    def reset(self) -> None:
+        """Clear anything the process left behind (contents, readings)."""
+
+
+@dataclass(eq=False)
+class Feed(Equipment):
+    """Fixed raw-material supply, restocked at the start of every attempt."""
+
+    n_in: int = 0
+    fixed: bool = True
+    stock: Stream = field(default_factory=Stream)
+
+
+@dataclass(eq=False)
+class Outlet(Equipment):
+    """Fixed outlet. Everything piped here is counted in `received`."""
+
+    n_in: int = 2
+    n_out: int = 0
+    fixed: bool = True
+    received: Stream = field(default_factory=Stream)
+
+    def reset(self) -> None:
+        self.received = Stream()
+
 
 @dataclass(eq=False)
 class Tank(Equipment):
-    capacity_gal: float = 50_000
-    diameter_ft: float = 20.0
-    volume_gal: float = 0.0
+    """Holds liquid. Two inlets so a recycle can join; a pump draws from the outlet."""
+
+    n_in: int = 2
+    capacity_gal: float = 10_000
+    content: Stream = field(default_factory=Stream)
 
     @property
-    def level_ft(self) -> float:
-        area_ft2 = math.pi * (self.diameter_ft / 2) ** 2
-        return self.volume_gal / GAL_PER_FT3 / area_ft2
-
-    @property
-    def fraction(self) -> float:
-        return self.volume_gal / self.capacity_gal
+    def volume_gal(self) -> float:
+        return self.content.total()
 
     @property
     def free_gal(self) -> float:
-        return self.capacity_gal - self.volume_gal
+        return max(0.0, self.capacity_gal - self.volume_gal)
+
+    def reset(self) -> None:
+        self.content = Stream()
 
 
 @dataclass(eq=False)
 class Pump(Equipment):
+    """Draws from a feed or tank on its inlet and pushes it downstream. Also boosts flow passing through."""
+
     max_gpm: float = 300
-    running: bool = False
+    running: bool = True
     flow_gpm: float = 0.0
 
     def toggle(self) -> None:
         self.running = not self.running
 
-
-@dataclass(eq=False)
-class Source(Equipment):
-    """Unlimited raw supply."""
-
-    n_in: int = 0
-    fixed: bool = True
+    def reset(self) -> None:
+        self.flow_gpm = 0.0
 
 
 @dataclass(eq=False)
-class Sink(Equipment):
-    """Product outlet. Whatever reaches it counts as produced."""
+class Reactor(Equipment):
+    """Runs one main reaction on what passes through, plus an optional side reaction."""
 
-    n_out: int = 0
-    fixed: bool = True
+    reaction: Reaction | None = None
+    conversion: float = 0.7
+    side: Reaction | None = None
+    side_conversion: float = 0.0
+
+    def react(self, stream: Stream) -> None:
+        if self.reaction:
+            self.reaction.apply(stream, self.conversion)
+        if self.side:
+            self.side.apply(stream, self.side_conversion)
+
+
+@dataclass(eq=False)
+class Separator(Equipment):
+    """Sends `top[species]` of each species to the top outlet (0), the rest to the bottom outlet (1)."""
+
+    n_out: int = 2
+    top: dict[str, float] = field(default_factory=dict)
+
+    def split(self, stream: Stream) -> tuple[Stream, Stream]:
+        top = Stream({s: v * self.top.get(s, 0.5) for s, v in stream.items()})
+        bottom = Stream({s: v - top[s] for s, v in stream.items()})
+        return top, bottom
+
+
+SPLITTER_RATIOS = (0.25, 0.5, 0.75)
+
+
+@dataclass(eq=False)
+class Splitter(Equipment):
+    """Splits by volume: `ratio` to the top outlet, the rest to the bottom. Click to cycle the ratio."""
+
+    n_out: int = 2
+    ratio: float = 0.5
+
+    def cycle(self) -> None:
+        i = SPLITTER_RATIOS.index(self.ratio) if self.ratio in SPLITTER_RATIOS else -1
+        self.ratio = SPLITTER_RATIOS[(i + 1) % len(SPLITTER_RATIOS)]
+
+
+@dataclass(eq=False)
+class Mixer(Equipment):
+    """Joins two streams."""
+
+    n_in: int = 2

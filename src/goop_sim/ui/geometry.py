@@ -1,12 +1,21 @@
 import pygame
 
-from goop_sim.sim.equipment import Equipment, Pump, Sink, Source, Tank
+from goop_sim.sim.equipment import Equipment, Feed, Mixer, Outlet, Pump, Reactor, Separator, Splitter, Tank
 from goop_sim.sim.network import Pipe, Port
 
 PORT_RADIUS = 7
 GRID = 20
 
-_SIZES = {Tank: (100, 120), Pump: (44, 44), Source: (90, 50), Sink: (90, 50)}
+_SIZES = {
+    Tank: (90, 110),
+    Pump: (40, 40),
+    Reactor: (90, 80),
+    Separator: (50, 130),
+    Splitter: (40, 40),
+    Mixer: (40, 40),
+    Feed: (100, 60),
+    Outlet: (110, 70),
+}
 
 
 def rect_of(eq: Equipment, pos=None) -> pygame.Rect:
@@ -33,8 +42,12 @@ def all_ports(eq: Equipment):
 def pipe_points(pipe: Pipe) -> list[tuple[int, int]]:
     x1, y1 = port_pos(pipe.out)
     x2, y2 = port_pos(pipe.into)
-    mx = (x1 + x2) // 2
-    return [(x1, y1), (mx, y1), (mx, y2), (x2, y2)]
+    if x2 >= x1 + 2 * GRID:
+        mx = (x1 + x2) // 2
+        return [(x1, y1), (mx, y1), (mx, y2), (x2, y2)]
+    # Backwards (recycle) pipe: step out, run below both ends, step back in.
+    low = max(rect_of(pipe.out.equipment).bottom, rect_of(pipe.into.equipment).bottom) + GRID
+    return [(x1, y1), (x1 + GRID, y1), (x1 + GRID, low), (x2 - GRID, low), (x2 - GRID, y2), (x2, y2)]
 
 
 def dist_to_segment(p, a, b) -> float:
