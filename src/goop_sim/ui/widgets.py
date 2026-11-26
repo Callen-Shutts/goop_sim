@@ -91,11 +91,12 @@ def draw_bar(surface, rect, fraction, color, edge=theme.VALUE_EDGE):
 # -- pipes --------------------------------------------------------------------
 
 
-def draw_pipe(surface, points, color, flow_gpm: float, t: float):
+def draw_pipe(surface, points, color, flow_gpm: float, t: float, highlight=False):
     """A pipe with its contents' color inside and dots moving with the flow."""
-    pygame.draw.lines(surface, theme.PIPE_WALL, False, points, 10)
+    wall = theme.PIPE_HOVER if highlight else theme.PIPE_WALL
+    pygame.draw.lines(surface, wall, False, points, 10)
     for p in points:
-        pygame.draw.circle(surface, theme.PIPE_WALL, p, 5)
+        pygame.draw.circle(surface, wall, p, 5)
     inner = color or theme.PIPE_EMPTY
     pygame.draw.lines(surface, inner, False, points, 6)
     for p in points[1:-1]:
@@ -113,6 +114,35 @@ def draw_pipe(surface, points, color, flow_gpm: float, t: float):
             pygame.draw.circle(surface, dot, av + (bv - av) * (d / length), 2)
             d += spacing
         d -= length
+
+
+def draw_hop(surface, arc, color, highlight=False):
+    """Redraw a line-jump arc on top of the pipe it crosses, with a background gap around it."""
+    pygame.draw.lines(surface, theme.BACKGROUND, False, arc, 14)
+    pygame.draw.lines(surface, theme.PIPE_HOVER if highlight else theme.PIPE_WALL, False, arc, 10)
+    pygame.draw.lines(surface, color or theme.PIPE_EMPTY, False, arc, 6)
+
+
+def pipe_details(pipe, dt: float, running: bool) -> list[str]:
+    """Tooltip for a pipe: where it runs, flow, and composition of what it carried last step."""
+    def end(port):
+        eq = port.equipment
+        if port.kind == "out" and isinstance(eq, (Separator, Splitter)):
+            return f"{eq.name} {'TOP' if port.index == 0 else 'BTM'}"
+        return eq.name
+
+    lines = [f"PIPE {end(pipe.out)} -> {end(pipe.into)}"]
+    total = pipe.carried.total()
+    if total <= 1e-9 or dt <= 0:
+        lines.append(" EMPTY / NO FLOW")
+        return lines
+    gpm = total * 60 / dt
+    lines.append(f" FLOW {gpm:,.0f} GPM" + ("" if running else "  (paused)"))
+    for species in theme.SPECIES:
+        gal = pipe.carried.get(species, 0.0)
+        if gal / total >= 0.0005:
+            lines.append(f"  {species} {gal / total:6.1%}  {gal * 60 / dt:7,.1f} GPM")
+    return lines
 
 
 # -- equipment ----------------------------------------------------------------

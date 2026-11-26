@@ -44,12 +44,12 @@ sim/      pure simulation, NO pygame import. Unit-tested.
 ## ui/
 
 - `theme.py`: dark DCS palette, `SPECIES` colors, layout sizes.
-- `geometry.py`: `_SIZES`, `rect_of`, `fit_rect` (icons), ports, `pipe_points` (forward = Z route, backward = loop under both units), hit-testing, `snap`.
+- `geometry.py`: `_SIZES`, `rect_of`, `fit_rect` (icons), ports, `pipe_points(pipe, lane)` (forward = Z route, backward = loop under both units; `lane` shifts the free legs), `lay_out_pipes` (first lane whose free legs don't overlap earlier pipes), `route_pipes` (laid-out paths plus line-jump arcs where a horizontal run crosses another pipe's vertical run; returns `{pipe: (path, hops)}`), hit-testing, `snap`. The play scene draws and hit-tests pipes from `route_pipes`, then redraws hop arcs on top.
 - `widgets.py`: `blend(stream)` color mixing, cached shaded `_cylinder` bodies, `draw_body` (symbol only; reused at icon size by `draw_icon`), `draw_equipment` (symbol + tags + value boxes + ports), `draw_pipe` (wall, contents color, moving dots), cards, tooltips, frames, buttons, bars, `describe`/`details` text.
 
 ## game.py / main.py
 
-`Game` owns the window, clock and current scene; `new_run(seed)` makes a `RunState` and `PlayScene`; `change_scene()` swaps scenes. `python -m goop_sim` -> `__main__.py` -> `main.main()`.
+`Game` owns the window, clock and current scene; `new_run(seed)` makes a `RunState` and `PlayScene`; `change_scene()` swaps scenes. The window is opened with `pygame.SCALED` (+ `FULLSCREEN` per `settings.FULLSCREEN`, else `RESIZABLE`) so all layout stays in 1280x720 logical pixels and mouse events are mapped automatically; F11 toggles fullscreen, Ctrl+Q quits. Falls back to a plain window if the driver can't scale (headless). `python -m goop_sim` -> `__main__.py` -> `main.main()`.
 
 ## Where things go next
 
@@ -59,4 +59,4 @@ sim/      pure simulation, NO pygame import. Unit-tested.
 
 ## Tests
 
-`tests/test_network.py` covers streams, reactions, connection rules, routing through every unit, pump setpoints, splitter tuning, overload effects, outlet grading, spills, tank-less loops and a recycle-through-tank plant. `tests/test_run.py` covers chemistry generation, dealing (incl. pump ranges), grants/draft, contract escalation and on-spec checks, restarts, and plant/settings persistence across contracts. Run `pytest`. UI is checked by driving the scenes with synthetic pygame events under `SDL_VIDEODRIVER=dummy` and saving screenshots.
+`tests/test_network.py` covers streams, reactions, connection rules, routing through every unit, pump setpoints, splitter tuning, overload effects, outlet grading, spills, tank-less loops and a recycle-through-tank plant. `tests/test_geometry.py` covers line jumps and lane separation. `tests/test_run.py` covers chemistry generation, dealing (incl. pump ranges), grants/draft, contract escalation and on-spec checks, restarts, and plant/settings persistence across contracts. Run `pytest`. UI is checked by driving the scenes with synthetic pygame events under `SDL_VIDEODRIVER=dummy` and saving screenshots.

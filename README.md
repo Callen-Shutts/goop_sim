@@ -18,7 +18,8 @@ at the required purity, then keep extending it as contracts escalate.
 - Right-click a pipe to delete it
 - Click a unit to open its faceplate: start/stop pumps, drag the setpoint slider, +/- buttons
 - Mouse wheel over a pump or splitter (or arrow keys on the selected one) tunes it
-- Hover anything for details (column splits, ratings, reactions, contents)
+- Hover anything for details (column splits, ratings, reactions, contents); hover a pipe to see its flow and composition
+- Starts fullscreen: F11 toggles fullscreen, Ctrl+Q quits
 - Space or RUN/PAUSE runs the plant live; F cycles speed 1x/4x/16x; RESTART restocks the feed
 - PRODUCT only counts streams at spec purity; reactors and columns lose performance above their rated GPM
 - Recycle loops need a tank in them; liquid with nowhere to go is spilled

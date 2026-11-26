@@ -16,6 +16,7 @@ from goop_sim.ui.geometry import (
     pipe_points,
     port_pos,
     rect_of,
+    route_pipes,
     snap,
 )
 
@@ -123,11 +124,19 @@ class PlayScene(Scene):
         return None
 
     def pipe_at(self, pos):
-        for pipe in self.net.pipes:
-            pts = pipe_points(pipe)
-            if any(dist_to_segment(pos, a, b) <= 6 for a, b in zip(pts, pts[1:])):
+        """Hit-test against the drawn routes (lanes and jumps included)."""
+        for pipe, (path, _hops) in route_pipes(self.net.pipes).items():
+            if any(dist_to_segment(pos, a, b) <= 6 for a, b in zip(path, path[1:])):
                 return pipe
         return None
+
+    def hovered_pipe(self):
+        """Pipe under the mouse, unless the mouse is on equipment, a port, or busy dragging/piping."""
+        if self.result or self.drag or self.slider or self.pending or not self.in_canvas(self.mouse):
+            return None
+        if self.equipment_at(self.mouse) or self.port_at(self.mouse):
+            return None
+        return self.pipe_at(self.mouse)
 
     def result_rect(self) -> pygame.Rect:
         rect = pygame.Rect(0, 0, 480, 250)
@@ -350,10 +359,16 @@ class PlayScene(Scene):
         self.draw_legend(surface)
 
         net = self.net
-        for pipe in net.pipes:
-            flowing = self.running and net.last_dt > 0
+        routes = route_pipes(net.pipes)
+        hovered = self.hovered_pipe()
+        colors = {pipe: self.pipe_color(pipe) for pipe in net.pipes}
+        flowing = self.running and net.last_dt > 0
+        for pipe, (path, _hops) in routes.items():
             gpm = pipe.carried.total() * 60 / net.last_dt if flowing else 0.0
-            widgets.draw_pipe(surface, pipe_points(pipe), self.pipe_color(pipe), gpm, self.t)
+            widgets.draw_pipe(surface, path, colors[pipe], gpm, self.t, pipe is hovered)
+        for pipe, (_path, hops) in routes.items():  # jumps go on top of the pipes they cross
+            for arc in hops:
+                widgets.draw_hop(surface, arc, colors[pipe], pipe is hovered)
         for eq in net.equipment:
             hot = self.pending if self.pending and self.pending.equipment is eq else None
             fill = None
@@ -378,6 +393,9 @@ class PlayScene(Scene):
             hover = self.equipment_at(self.mouse) if self.in_canvas(self.mouse) else self.card_at(self.mouse)
             if hover and hover is not self.selected:
                 widgets.draw_tooltip(surface, self.font, self.mouse, widgets.details(hover))
+            elif hovered:
+                lines = widgets.pipe_details(hovered, net.last_dt, self.running)
+                widgets.draw_tooltip(surface, self.font, self.mouse, lines)
 
     def draw_header(self, surface):
         run, c = self.run, self.run.contract
@@ -497,7 +515,7 @@ class PlayScene(Scene):
             x += width + 8
         state = "RUNNING" if self.running else "PAUSED"
         widgets.draw_text(surface, self.font, (x + 8, top + 14), state, theme.OK if self.running else theme.MUTED, "midleft")
-        hint = "drag cards to place  |  out port -> in port to pipe  |  right-click pipe to remove  |  wheel to tune"
+        hint = "drag cards | out->in port: pipe | right-click: remove pipe | F11 fullscreen | Ctrl+Q quit"
         widgets.draw_text(surface, self.font, (x + 8, top + 33), hint, theme.MUTED, "midleft")
 
     def draw_legend(self, surface):
