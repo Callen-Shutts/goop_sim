@@ -339,7 +339,7 @@ def details(eq: Equipment) -> list[str]:
             lines.append(f"OVERLOADED: {eq.effective_conversion(eq.load_gpm):.0%} NOW")
         if eq.side:
             lines.append(f"SIDE {eq.side.label} {eq.side_conversion:.0%}")
-        lines.append("Faster than rated = less conversion")
+        lines.append("Over rating: less conversion")
         return lines
     if isinstance(eq, Separator):
         items = [f"{s}{f:4.0%}" for s, f in eq.top.items()]
@@ -348,7 +348,7 @@ def details(eq: Equipment) -> list[str]:
         lines.append(f"RATED {eq.rated_gpm:.0f} GPM")
         if eq.load_gpm > eq.rated_gpm + 0.5:
             lines.append("FLOODING: splits smearing")
-        lines.append("Faster than rated = sloppier split")
+        lines.append("Over rating: sloppier split")
         return lines
     if isinstance(eq, Splitter):
         return [f"{eq.name}  SPLITTER", f"TOP {eq.ratio:.0%} / BTM {1 - eq.ratio:.0%}"]

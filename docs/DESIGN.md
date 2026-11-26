@@ -8,6 +8,7 @@ A roguelike chemical-engineering game styled as a dark DCS/HMI control-room scre
 
 - 2D, Python, pygame-ce.
 - **Build, then run and tune it yourself.** Drag equipment from the inventory (each card has an icon), click an out port then an in port to pipe it. RUN starts the plant live; everything stays editable. There is no pass/fail screen after a run: you watch the colors and readouts and figure out what is wrong.
+- **Removing units.** Any placed unit (not FEED/PRODUCT/WASTE) can go back to the inventory at any time: right-click, Delete/Backspace on the selected unit, the faceplate TO INV key, or drag to the panel. Its pipes are removed and its contents lost; its settings (setpoint, split) are kept.
 - **Tuning.** Every pump has a dealt flow range (e.g. 30-150 GPM) with a tunable setpoint; splitters tune 0-100% in 5% steps. Faceplate panel (click a unit), mouse wheel over a unit, or arrow keys.
 - **Rate matters.** Reactors and columns have a rated GPM. Above it, reactor conversion drops and column splits smear toward 50/50 (load box turns red). Faster finishes sooner but risks going off-spec, so there is a sweet spot to find.
 - **Contracts.** Deliver ≥ N gal of a target species into PRODUCT. Each arriving stream is graded: only streams at ≥ P% purity count; off-spec streams are rejected (shown in the header). The contract completes the moment enough on-spec product has arrived. Thresholds, not optimization, so many designs pass.

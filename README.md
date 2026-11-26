@@ -13,7 +13,8 @@ at the required purity, then keep extending it as contracts escalate.
 
 ## Controls
 
-- Drag equipment from the right-hand panel onto the canvas; drag it back to the panel to remove it
+- Drag equipment from the right-hand panel onto the canvas
+- Send a unit back to the inventory: right-click it, press Delete/Backspace when it's selected, use the faceplate's TO INV button, or drag it onto the panel (its pipes and contents are removed; settings are kept)
 - Click an out port, then an in port, to run a pipe between them (Esc or right-click cancels)
 - Right-click a pipe to delete it
 - Click a unit to open its faceplate: start/stop pumps, drag the setpoint slider, +/- buttons

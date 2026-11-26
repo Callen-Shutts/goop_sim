@@ -162,6 +162,21 @@ class PlayScene(Scene):
             self.pipe_memory.clear()
             self.result = None
 
+    def return_to_inventory(self, eq):
+        """Take a placed unit off the canvas: its pipes go, its contents are lost, settings are kept."""
+        if eq is None or eq.fixed or eq not in self.net.equipment:
+            return
+        for pipe in [p for p in self.net.pipes if eq in (p.out.equipment, p.into.equipment)]:
+            self.pipe_memory.pop(pipe, None)
+        if self.pending and self.pending.equipment is eq:
+            self.pending = None
+        self.net.remove(eq)
+        eq.pos = None
+        eq.reset()
+        self.run.inventory.append(eq)
+        if self.selected is eq:
+            self.selected = None
+
     def nudge(self, eq, steps):
         if isinstance(eq, (Pump, Splitter)):
             eq.nudge(steps)
@@ -229,6 +244,8 @@ class PlayScene(Scene):
                 self.toggle_run()
             elif event.key == pygame.K_f:
                 self.cycle_speed()
+            elif event.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
+                self.return_to_inventory(self.selected)
             elif event.key in (pygame.K_UP, pygame.K_RIGHT):
                 self.nudge(self.selected, 1)
             elif event.key in (pygame.K_DOWN, pygame.K_LEFT):
@@ -273,6 +290,12 @@ class PlayScene(Scene):
         if self.pending:
             self.pending = None
             return
+        if not self.in_canvas(pos):
+            return
+        eq = self.equipment_at(pos)
+        if eq:
+            self.return_to_inventory(eq)
+            return
         pipe = self.pipe_at(pos)
         if pipe:
             self.net.disconnect(pipe)
@@ -308,12 +331,7 @@ class PlayScene(Scene):
             return
         if not self.in_canvas(pos):
             if not d["from_inventory"]:
-                self.net.remove(eq)
-                eq.pos = None
-                eq.reset()
-                self.run.inventory.append(eq)
-                if self.selected is eq:
-                    self.selected = None
+                self.return_to_inventory(eq)
             return
         target = snap((pos[0] + d["offset"][0], pos[1] + d["offset"][1]))
         if d["from_inventory"]:
@@ -432,6 +450,11 @@ class PlayScene(Scene):
         rect, eq = FACEPLATE, self.selected
         widgets.draw_frame(surface, self.font, rect, f"FACEPLATE  {eq.name}" if eq else "FACEPLATE")
         x, y, w = rect.x + 10, rect.y + 28, rect.width - 20
+        if eq is not None and not eq.fixed:
+            # small "return to inventory" key in the title strip
+            back = pygame.Rect(rect.right - 92, rect.y + 2, 88, 16)
+            widgets.draw_button(surface, self.font, back, "TO INV [DEL]", theme.KEY_DANGER)
+            self.controls.append((back, lambda _p, e=eq: self.return_to_inventory(e), None))
         if eq is None:
             for i, line in enumerate(["Click a unit to inspect", "and tune it here.", "", "Wheel over a pump or", "splitter to adjust it."]):
                 widgets.draw_text(surface, self.font, (x, y + 4 + i * 18), line, theme.MUTED, "topleft")
@@ -515,7 +538,7 @@ class PlayScene(Scene):
             x += width + 8
         state = "RUNNING" if self.running else "PAUSED"
         widgets.draw_text(surface, self.font, (x + 8, top + 14), state, theme.OK if self.running else theme.MUTED, "midleft")
-        hint = "drag cards | out->in port: pipe | right-click: remove pipe | F11 fullscreen | Ctrl+Q quit"
+        hint = "drag cards | out->in port: pipe | right-click unit/pipe: remove | F11 fullscreen | Ctrl+Q quit"
         widgets.draw_text(surface, self.font, (x + 8, top + 33), hint, theme.MUTED, "midleft")
 
     def draw_legend(self, surface):
