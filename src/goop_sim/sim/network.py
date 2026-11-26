@@ -25,7 +25,7 @@ class Pipe:
 class Network:
     """Placed equipment plus the pipes between it.
 
-    Flow model: each step, every running pump draws from the feed or tank on its inlet and
+    Flow model: each step, every running pump draws its setpoint from the feed or tank on its inlet and
     pushes that liquid downstream. It passes instantly through reactors, separators, splitters,
     mixers and other running pumps until it lands in a tank or an outlet. Liquid with nowhere to
     go (open port, full tank, stopped pump, loop with no tank) is spilled.
@@ -36,7 +36,7 @@ class Network:
         self.pipes: list[Pipe] = []
         self.spilled_gal = 0.0
         self.moved_gal = 0.0  # drawn by pumps during the last step
-        self._dt = 0.0
+        self.last_dt = 0.0
 
     def add(self, eq: Equipment) -> None:
         self.equipment.append(eq)
@@ -73,9 +73,14 @@ class Network:
     def step(self, dt: float) -> None:
         """Advance `dt` simulated seconds."""
         self.moved_gal = 0.0
-        self._dt = dt
+        self.last_dt = dt
         for pipe in self.pipes:
             pipe.carried = Stream()
+        for eq in self.equipment:
+            if isinstance(eq, Outlet):
+                eq.inflow = Stream()
+            elif isinstance(eq, (Reactor, Separator)):
+                eq.load_gpm = 0.0
         pumps = [eq for eq in self.equipment if isinstance(eq, Pump)]
         for pump in pumps:
             pump.flow_gpm = 0.0
@@ -94,7 +99,7 @@ class Network:
                 holdup = source.content
             else:
                 continue  # fed by inline equipment: it only boosts what is pushed into it
-            drawn = holdup.take(pump.max_gpm * dt / 60)
+            drawn = holdup.take(pump.setpoint_gpm * dt / 60)
             if drawn.total() <= 0:
                 continue
             self.moved_gal += drawn.total()
@@ -121,19 +126,23 @@ class Network:
             eq.content.add(stream.scaled(keep))
             self.spilled_gal += total * (1 - keep)
         elif isinstance(eq, Outlet):
-            eq.received.add(stream)
+            eq.take_in(stream)
         elif isinstance(eq, Pump):
             if eq.running:
-                eq.flow_gpm += stream.total() * 60 / self._dt
+                eq.flow_gpm += stream.total() * 60 / self.last_dt
                 self._forward(eq, 0, stream, depth)
             else:
                 self.spilled_gal += stream.total()
         elif isinstance(eq, Reactor):
+            gpm = stream.total() * 60 / self.last_dt
+            eq.load_gpm += gpm
             out = stream.copy()
-            eq.react(out)
+            eq.react(out, gpm)
             self._forward(eq, 0, out, depth)
         elif isinstance(eq, Separator):
-            top, bottom = eq.split(stream)
+            gpm = stream.total() * 60 / self.last_dt
+            eq.load_gpm += gpm
+            top, bottom = eq.split(stream, gpm)
             self._forward(eq, 0, top, depth)
             self._forward(eq, 1, bottom, depth)
         elif isinstance(eq, Splitter):

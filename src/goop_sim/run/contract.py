@@ -7,29 +7,35 @@ from goop_sim.sim.stream import Stream
 # Base delivery per chain step (later steps take more feed per gallon of product).
 BASE_QUANTITY = {1: 3000, 2: 1500, 3: 1000}
 BASE_PURITY = 0.75
-FEED_GAL = 10_000
+FEED_GAL = 15_000  # generous: tuning a plant live wastes feed
 
 
 @dataclass
 class Contract:
+    """Deliver `quantity_gal` of `species` into PRODUCT in streams at least `purity` pure.
+
+    Grading happens per stream at the outlet (see Outlet.take_in): off-spec product does not count.
+    """
+
     level: int
     species: str
     quantity_gal: float
     purity: float
     feed: Stream
 
-    def delivered(self, received: Stream) -> float:
-        return received.get(self.species, 0.0)
+    @property
+    def spec(self) -> tuple[str, float]:
+        return self.species, self.purity
 
-    def check(self, received: Stream) -> bool:
-        return (
-            self.delivered(received) >= self.quantity_gal - 1e-6
-            and received.fraction(self.species) >= self.purity - 1e-9
-        )
+    def delivered(self, outlet) -> float:
+        return outlet.accepted.get(self.species, 0.0)
+
+    def check(self, outlet) -> bool:
+        return self.delivered(outlet) >= self.quantity_gal - 1e-6
 
     @property
     def summary(self) -> str:
-        return f"DELIVER {self.quantity_gal:,.0f} GAL {self.species} @ {self.purity:.0%} PURE"
+        return f"{self.quantity_gal:,.0f} GAL {self.species} AT {self.purity:.0%}+ PURITY"
 
 
 def make_contract(level: int, chem: Chemistry, rng: random.Random) -> Contract:

@@ -22,9 +22,9 @@ sim/      pure simulation, NO pygame import. Unit-tested.
 
 - `stream.py`: `Stream`, a `dict` of species -> gallons with `total`, `take` (remove keeping composition), `scaled`, `add`, `fraction`, `dominant`.
 - `chemistry.py`: `Reaction` (reactant/product coefficient dicts, `apply(stream, conversion)` on the limiting reactant, `label`), `parse("A+B>C")`, `STEP_TEMPLATES`, `Chemistry` (the run's `chain`; `target(level)`, `known(level)`), `generate_chemistry(rng)`, `side_reaction_for`.
-- `equipment.py`: dataclasses, all `eq=False` (identity comparison, hashable). Base `Equipment` (`name`, `n_in`, `n_out`, `pos`, `fixed`, `reset()`). `Feed` (stock), `Outlet` (received), `Tank` (content, capacity), `Pump` (max_gpm, running, flow_gpm), `Reactor` (reaction, conversion, optional side reaction), `Separator` (`top[species]` share to out 0), `Splitter` (ratio to out 0, `cycle()`), `Mixer` (2 in).
-- `network.py`: `Port`, `Pipe` (`carried` = what flowed last step, for drawing), `Network` (connect rules, `step(dt)`).
-  - **Flow model:** each running pump whose inlet is piped straight from a `Feed` or `Tank` draws `max_gpm*dt/60` from it and pushes it downstream. The push passes instantly through reactors, separators, splitters, mixers and running pumps until it lands in a tank or outlet. Open ports, full tanks, stopped pumps and tank-less loops (depth > `MAX_DEPTH`) spill; `spilled_gal` tracks it. Recycle loops therefore need a tank.
+- `equipment.py`: dataclasses, all `eq=False` (identity comparison, hashable). Base `Equipment` (`name`, `n_in`, `n_out`, `pos`, `fixed`, `reset()`). `Feed` (stock), `Outlet` (received; with a `spec` it grades each arriving stream into `accepted` or `rejected_gal`; `inflow` = last step), `Tank` (content, capacity), `Pump` (min/max range, `setpoint_gpm`, `nudge`, running, flow_gpm), `Reactor` (reaction, conversion, `rated_gpm`, `load_gpm`, optional side reaction; `effective_conversion(gpm)`), `Separator` (`top[species]` share to out 0, `rated_gpm`, `effective_top(gpm)` smears toward 0.5 when overloaded), `Splitter` (ratio to out 0, `set_ratio`/`nudge` in 5% steps), `Mixer` (2 in).
+- `network.py`: `Port`, `Pipe` (`carried` = what flowed last step, for drawing), `Network` (connect rules, `step(dt)`, `last_dt`).
+  - **Flow model:** each running pump whose inlet is piped straight from a `Feed` or `Tank` draws `setpoint_gpm*dt/60` from it and pushes it downstream. The push passes instantly through reactors, separators, splitters, mixers and running pumps until it lands in a tank or outlet; reactors and columns see that push's GPM and lose performance above their rating. Open ports, full tanks, stopped pumps and tank-less loops (depth > `MAX_DEPTH`) spill; `spilled_gal` tracks it. Recycle loops therefore need a tank.
 
 ## content/
 
@@ -32,14 +32,20 @@ sim/      pure simulation, NO pygame import. Unit-tested.
 
 ## run/
 
-- `contract.py`: `Contract` (species, quantity, purity, feed `Stream`, `check(received)`), `make_contract(level, chem, rng)` with the scaling rules.
-- `state.py`: `RunState` owns the seed/rng, chemistry, `Network` (with fixed FEED/PRODUCT/WASTE), `inventory`, `level`, `contract`, `attempts_left`, `over`. `reset_plant()` restocks for an attempt, `finish_attempt()` scores, `draft_options()`/`next_grant()`/`advance()` move to the next contract keeping the plant.
+- `contract.py`: `Contract` (species, quantity, purity, feed `Stream`, `spec`, `check(outlet)` on accepted product), `make_contract(level, chem, rng)` with the scaling rules.
+- `state.py`: `RunState` owns the seed/rng, chemistry, `Network` (with fixed FEED/PRODUCT/WASTE), `inventory`, `level`, `contract`, `restarts_left`. Sets PRODUCT's spec per contract. `met`, `feed_empty`, `restart()` (restock, empty, keep layout/settings), `draft_options()`/`next_grant()`/`advance()`.
 
 ## scenes/
 
 - `base.py`: `Scene` interface (`handle_event`, `update(dt)`, `draw(surface)`).
-- `play.py`: `PlayScene(game, run)`. Modes `build` / `running` / `result`. Places fixtures the first time. Runs the sim at `SIM_SPEED` sim-seconds per real second times the speed setting (1/4/16x, F key), in substeps; an attempt ends on STOP or after `IDLE_END` real seconds with no flow. Result overlay leads to the draft, back to build, or a new run.
-- `draft.py`: `DraftScene(game, run)`. Pick `DRAFT_PICKS` cards, then `run.advance()` and back to a new `PlayScene`.
+- `play.py`: `PlayScene(game, run)`. `running` flag plus a `result` overlay; editing is always allowed. Layout: header (contract + progress bar), canvas with dot grid, right panel (scrollable `INVENTORY` cards with icons, `FACEPLATE` for the selected unit), bottom softkeys (RUN/PAUSE, SPEED 1/4/16x, RESTART). `self.controls` is a list of `(rect, on_click, on_drag)` rebuilt every `draw()` (softkeys, faceplate buttons/sliders); clicks check it first. Runs the sim at `SIM_SPEED` sim-seconds per real second times the speed, in substeps; shows the result as soon as `run.met`, or "out of feed" after `IDLE_END` idle seconds with an empty feed. `pipe_memory` keeps idle pipes tinted.
+- `draft.py`: `DraftScene(game, run)`. Big icon cards; pick `DRAFT_PICKS`, then `run.advance()` and back to a new `PlayScene`.
+
+## ui/
+
+- `theme.py`: dark DCS palette, `SPECIES` colors, layout sizes.
+- `geometry.py`: `_SIZES`, `rect_of`, `fit_rect` (icons), ports, `pipe_points` (forward = Z route, backward = loop under both units), hit-testing, `snap`.
+- `widgets.py`: `blend(stream)` color mixing, cached shaded `_cylinder` bodies, `draw_body` (symbol only; reused at icon size by `draw_icon`), `draw_equipment` (symbol + tags + value boxes + ports), `draw_pipe` (wall, contents color, moving dots), cards, tooltips, frames, buttons, bars, `describe`/`details` text.
 
 ## game.py / main.py
 
@@ -53,4 +59,4 @@ sim/      pure simulation, NO pygame import. Unit-tested.
 
 ## Tests
 
-`tests/test_network.py` covers streams, reactions, connection rules, routing through every unit, spills, tank-less loops and a recycle-through-tank plant. `tests/test_run.py` covers chemistry generation, dealing, grants/draft, contract escalation and checks, attempts, and plant persistence across contracts. Run `pytest`. UI is checked by driving the scenes with synthetic pygame events under `SDL_VIDEODRIVER=dummy` and saving screenshots.
+`tests/test_network.py` covers streams, reactions, connection rules, routing through every unit, pump setpoints, splitter tuning, overload effects, outlet grading, spills, tank-less loops and a recycle-through-tank plant. `tests/test_run.py` covers chemistry generation, dealing (incl. pump ranges), grants/draft, contract escalation and on-spec checks, restarts, and plant/settings persistence across contracts. Run `pytest`. UI is checked by driving the scenes with synthetic pygame events under `SDL_VIDEODRIVER=dummy` and saving screenshots.

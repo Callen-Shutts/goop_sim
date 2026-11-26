@@ -19,6 +19,11 @@ def link(net, a, b, out=0, into=0):
     return pipe
 
 
+def fixed_pump(name, gpm=60, **kw):
+    """A pump fixed at `gpm` (range collapsed to one value)."""
+    return Pump(name, min_gpm=gpm, max_gpm=gpm, **kw)
+
+
 def feed(gal=1000, **extra):
     return Feed("F", stock=Stream({"A": gal, **extra}))
 
@@ -53,7 +58,7 @@ def test_reaction_coefficients_and_label():
 
 
 def test_connect_rejects_invalid_pipes():
-    src, pump, sink = feed(), Pump("P"), Outlet("O")
+    src, pump, sink = feed(), fixed_pump("P"), Outlet("O")
     net = build(src, pump, sink)
     assert net.connect(Port(src, "out"), Port(pump, "in"))
     assert net.connect(Port(src, "out"), Port(sink, "in")) is None  # out port already used
@@ -63,7 +68,7 @@ def test_connect_rejects_invalid_pipes():
 
 
 def test_removing_equipment_removes_its_pipes():
-    src, pump = feed(), Pump("P")
+    src, pump = feed(), fixed_pump("P")
     net = build(src, pump)
     link(net, src, pump)
     net.remove(pump)
@@ -74,7 +79,7 @@ def test_removing_equipment_removes_its_pipes():
 
 
 def test_pump_draws_feed_through_reactor_to_outlet():
-    src, pump, reactor, out = feed(), Pump("P", max_gpm=60), Reactor("R", reaction=parse("A>B"), conversion=0.5), Outlet("O")
+    src, pump, reactor, out = feed(), fixed_pump("P", 60), Reactor("R", reaction=parse("A>B"), conversion=0.5), Outlet("O")
     net = build(src, pump, reactor, out)
     link(net, src, pump)
     link(net, pump, reactor)
@@ -87,7 +92,7 @@ def test_pump_draws_feed_through_reactor_to_outlet():
 
 
 def test_separator_and_splitter_route_by_fraction():
-    src, pump = Feed("F", stock=Stream(A=50, B=50)), Pump("P", max_gpm=6000)
+    src, pump = Feed("F", stock=Stream(A=50, B=50)), fixed_pump("P", 6000)
     sep = Separator("C", top={"A": 0.1, "B": 0.9})
     split = Splitter("S", ratio=0.25)
     top, purge, recycle = Outlet("T"), Outlet("U"), Outlet("V")
@@ -104,18 +109,76 @@ def test_separator_and_splitter_route_by_fraction():
     assert recycle.received == pytest.approx({"A": 33.75, "B": 3.75})
 
 
-def test_splitter_cycles_ratios():
+def test_splitter_ratio_tunes_in_steps_and_clamps():
     s = Splitter("S")
-    seen = []
-    for _ in range(3):
-        s.cycle()
-        seen.append(s.ratio)
-    assert seen == [0.75, 0.25, 0.5]
+    s.nudge(3)
+    assert s.ratio == pytest.approx(0.65)
+    s.nudge(-20)
+    assert s.ratio == 0.0
+    s.set_ratio(1.7)
+    assert s.ratio == 1.0
+    s.set_ratio(0.33)
+    assert s.ratio == pytest.approx(0.35)
+
+
+def test_pump_setpoint_starts_mid_range_and_clamps():
+    p = Pump("P", min_gpm=50, max_gpm=300)
+    assert p.setpoint_gpm == 175
+    assert p.step_gpm == 10
+    p.nudge(100)
+    assert p.setpoint_gpm == 300
+    p.set_setpoint(0)
+    assert p.setpoint_gpm == 50
+
+
+def test_pump_draws_its_setpoint():
+    src, p, out = feed(), Pump("P", min_gpm=10, max_gpm=600, setpoint_gpm=120), Outlet("O")
+    net = build(src, p, out)
+    link(net, src, p)
+    link(net, p, out)
+    net.step(60)
+    assert out.received["A"] == pytest.approx(120)
+    p.set_setpoint(30)
+    net.step(60)
+    assert out.received["A"] == pytest.approx(150)
+
+
+def test_overloaded_reactor_converts_less():
+    r = Reactor("R", reaction=parse("A>B"), conversion=0.8, rated_gpm=100)
+    assert r.effective_conversion(100) == pytest.approx(0.8)
+    assert r.effective_conversion(200) < 0.8 * 0.6
+    src, p, out = feed(), Pump("P", min_gpm=10, max_gpm=600, setpoint_gpm=200), Outlet("O")
+    net = build(src, p, r, out)
+    link(net, src, p)
+    link(net, p, r)
+    link(net, r, out)
+    net.step(60)
+    assert r.load_gpm == pytest.approx(200)
+    assert out.received["B"] < 0.8 * 200 * 0.6
+
+
+def test_flooded_column_smears_toward_half():
+    c = Separator("C", top={"A": 0.9, "B": 0.1}, rated_gpm=100)
+    assert c.effective_top(50) == pytest.approx({"A": 0.9, "B": 0.1})
+    assert c.effective_top(200) == pytest.approx({"A": 0.7, "B": 0.3})
+    top, bottom = c.split(Stream(A=10, B=10), 200)
+    assert top == pytest.approx({"A": 7, "B": 3})
+
+
+def test_outlet_grades_each_stream_against_spec():
+    out = Outlet("O", spec=("B", 0.8))
+    out.take_in(Stream(B=90, A=10))
+    out.take_in(Stream(B=50, A=50))
+    assert out.accepted == pytest.approx({"B": 90})
+    assert out.rejected_gal == pytest.approx(100)
+    assert out.received.total() == pytest.approx(200)
+    out.reset()
+    assert out.accepted.total() == 0 and out.rejected_gal == 0
 
 
 def test_mixer_joins_streams():
     f1, f2 = feed(100), Feed("G", stock=Stream(B=100))
-    p1, p2, mix, out = Pump("P1", max_gpm=60), Pump("P2", max_gpm=60), Mixer("M"), Outlet("O")
+    p1, p2, mix, out = fixed_pump("P1", 60), fixed_pump("P2", 60), Mixer("M"), Outlet("O")
     net = build(f1, f2, p1, p2, mix, out)
     link(net, f1, p1)
     link(net, f2, p2)
@@ -127,7 +190,7 @@ def test_mixer_joins_streams():
 
 
 def test_full_tank_spills_the_excess():
-    src, pump, tank = feed(), Pump("P", max_gpm=600), Tank("T", capacity_gal=4)
+    src, pump, tank = feed(), fixed_pump("P", 600), Tank("T", capacity_gal=4)
     net = build(src, pump, tank)
     link(net, src, pump)
     link(net, pump, tank)
@@ -137,7 +200,7 @@ def test_full_tank_spills_the_excess():
 
 
 def test_open_port_and_stopped_pump_spill():
-    src, p1, reactor, p2 = feed(), Pump("P1", max_gpm=60), Reactor("R", reaction=parse("A>B")), Pump("P2", running=False)
+    src, p1, reactor, p2 = feed(), fixed_pump("P1", 60), Reactor("R", reaction=parse("A>B")), fixed_pump("P2", running=False)
     net = build(src, p1, reactor, p2)
     link(net, src, p1)
     link(net, p1, reactor)
@@ -149,7 +212,7 @@ def test_open_port_and_stopped_pump_spill():
 
 
 def test_pump_without_outlet_draws_nothing():
-    src, pump = feed(), Pump("P")
+    src, pump = feed(), fixed_pump("P")
     net = build(src, pump)
     link(net, src, pump)
     net.step(1)
@@ -158,7 +221,7 @@ def test_pump_without_outlet_draws_nothing():
 
 
 def test_loop_without_tank_spills_instead_of_hanging():
-    src, pump, mix, reactor = feed(), Pump("P", max_gpm=60), Mixer("M"), Reactor("R", reaction=parse("A>B"))
+    src, pump, mix, reactor = feed(), fixed_pump("P", 60), Mixer("M"), Reactor("R", reaction=parse("A>B"))
     net = build(src, pump, mix, reactor)
     link(net, src, pump)
     link(net, pump, mix, into=0)
@@ -173,7 +236,7 @@ def test_recycle_through_tank_beats_single_pass():
 
     def plant(recycle):
         src = feed(1000)
-        p1, tank, p2 = Pump("P1", max_gpm=600), Tank("T", capacity_gal=5000), Pump("P2", max_gpm=600)
+        p1, tank, p2 = fixed_pump("P1", 600), Tank("T", capacity_gal=5000), fixed_pump("P2", 600)
         reactor = Reactor("R", reaction=parse("A>B"), conversion=0.5)
         sep = Separator("C", top={"A": 0.0, "B": 1.0})
         product, waste = Outlet("O"), Outlet("W")

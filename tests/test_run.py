@@ -1,10 +1,10 @@
 import random
 
-from goop_sim.content.equipment import Namer, draft_options, level_grant, starting_hand
+from goop_sim.content.equipment import Namer, draft_options, level_grant, make_pump, starting_hand
 from goop_sim.run.contract import make_contract
-from goop_sim.run.state import ATTEMPTS, RunState
+from goop_sim.run.state import RESTARTS, RunState
 from goop_sim.sim.chemistry import FEED_SPECIES, WASTE_SPECIES, generate_chemistry
-from goop_sim.sim.equipment import Pump, Reactor, Separator, Tank
+from goop_sim.sim.equipment import Outlet, Pump, Reactor, Separator, Tank
 from goop_sim.sim.stream import Stream
 
 
@@ -36,6 +36,14 @@ def test_starting_hand_can_make_the_first_product():
     assert len({e.name for e in hand}) == len(hand)
 
 
+def test_dealt_pumps_have_a_tunable_range():
+    rng, namer = random.Random(0), Namer()
+    for _ in range(50):
+        p = make_pump(rng, namer)
+        assert 0 < p.min_gpm < p.max_gpm
+        assert p.min_gpm <= p.setpoint_gpm <= p.max_gpm
+
+
 def test_grant_gives_the_new_reaction_and_draft_only_known_reactions():
     rng = random.Random(2)
     chem = generate_chemistry(rng)
@@ -60,21 +68,35 @@ def test_contracts_escalate():
     assert contracts[0].feed.get(WASTE_SPECIES, 0) == 0
 
 
-def test_contract_check_needs_quantity_and_purity():
+def test_contract_counts_only_on_spec_product():
     contract = make_contract(1, generate_chemistry(random.Random(0)), random.Random(0))
     sp, qty = contract.species, contract.quantity_gal
-    assert contract.check(Stream({sp: qty}))
-    assert not contract.check(Stream({sp: qty - 1}))
-    assert not contract.check(Stream({sp: qty, "A": qty}))
+    out = Outlet("O", spec=contract.spec)
+    out.take_in(Stream({sp: qty, "A": qty}))  # 50% pure: rejected
+    assert not contract.check(out)
+    out.take_in(Stream({sp: qty - 1}))
+    assert not contract.check(out)
+    out.take_in(Stream({sp: 1}))
+    assert contract.check(out)
 
 
-def test_failed_attempts_end_the_run():
+def test_run_sets_product_spec_and_meets_contract():
     run = RunState(seed=1)
-    for i in range(ATTEMPTS):
-        assert not run.over
-        assert run.finish_attempt() is False
-        run.reset_plant()
-    assert run.over
+    assert run.product.spec == run.contract.spec
+    assert not run.met
+    run.product.take_in(Stream({run.contract.species: run.contract.quantity_gal}))
+    assert run.met
+
+
+def test_restarts_restock_and_run_out():
+    run = RunState(seed=1)
+    run.feed.stock.take(1e9)
+    assert run.feed_empty
+    for _ in range(RESTARTS):
+        assert run.restart()
+        assert not run.feed_empty
+        run.feed.stock.take(1e9)
+    assert not run.restart()
 
 
 def test_advance_keeps_the_plant_and_restocks():
@@ -82,16 +104,19 @@ def test_advance_keeps_the_plant_and_restocks():
     pump = next(e for e in run.inventory if isinstance(e, Pump))
     run.inventory.remove(pump)
     pump.pos = (300, 300)
+    pump.set_setpoint(pump.max_gpm)
     run.net.add(pump)
     run.feed.stock.take(5000)
-    run.product.received.add({run.contract.species: 99})
+    run.product.take_in(Stream({run.contract.species: 99}))
 
     grant, picks = run.next_grant(), run.draft_options()[:2]
     run.advance(picks, grant)
 
     assert run.level == 2
     assert pump in run.net.equipment
+    assert pump.setpoint_gpm == pump.max_gpm  # settings carry over
     assert all(e in run.inventory for e in grant + picks)
     assert run.product.received.total() == 0
+    assert run.product.spec == run.contract.spec
     assert run.feed.stock.total() == run.contract.feed.total()
-    assert run.attempts_left == ATTEMPTS
+    assert run.restarts_left == RESTARTS

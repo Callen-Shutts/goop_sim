@@ -8,12 +8,17 @@ from goop_sim.sim.chemistry import generate_chemistry
 from goop_sim.sim.equipment import Equipment, Feed, Outlet
 from goop_sim.sim.network import Network
 
-ATTEMPTS = 3
+RESTARTS = 2  # per contract: restock the feed and empty the plant
 DRAFT_PICKS = 2
 DRAFT_OPTIONS = 5
 
 
 class RunState:
+    """The plant runs live; a contract is met as soon as enough on-spec product has arrived.
+
+    Running out of feed without meeting it costs a restart; with none left the run is over.
+    """
+
     def __init__(self, seed: int | None = None):
         self.seed = seed if seed is not None else random.randrange(2**31)
         self.rng = random.Random(self.seed)
@@ -27,16 +32,16 @@ class RunState:
             self.net.add(fixture)
         self.inventory: list[Equipment] = starting_hand(self.rng, self.chem, self.namer)
         self.level = 1
-        self.over = False
         self.start_contract()
 
     def start_contract(self) -> None:
         self.contract: Contract = make_contract(self.level, self.chem, self.rng)
-        self.attempts_left = ATTEMPTS
+        self.product.spec = self.contract.spec
+        self.restarts_left = RESTARTS
         self.reset_plant()
 
     def reset_plant(self) -> None:
-        """Back to a fresh attempt: restock the feed, empty tanks and outlets. Layout is kept."""
+        """Restock the feed, empty tanks and outlets. Layout and settings are kept."""
         for eq in self.net.equipment + self.inventory:
             eq.reset()
         self.feed.stock = self.contract.feed.copy()
@@ -44,14 +49,20 @@ class RunState:
         for pipe in self.net.pipes:
             pipe.carried.clear()
 
-    def finish_attempt(self) -> bool:
-        """Score the attempt that just ran. A failure costs an attempt; running out ends the run."""
-        if self.contract.check(self.product.received):
-            return True
-        self.attempts_left -= 1
-        if self.attempts_left <= 0:
-            self.over = True
-        return False
+    @property
+    def met(self) -> bool:
+        return self.contract.check(self.product)
+
+    @property
+    def feed_empty(self) -> bool:
+        return self.feed.stock.total() < 1.0
+
+    def restart(self) -> bool:
+        if self.restarts_left <= 0:
+            return False
+        self.restarts_left -= 1
+        self.reset_plant()
+        return True
 
     def draft_options(self) -> list[Equipment]:
         return draft_options(self.rng, self.chem, self.namer, self.level + 1, DRAFT_OPTIONS)

@@ -16,9 +16,11 @@ at the required purity, then keep extending it as contracts escalate.
 - Drag equipment from the right-hand panel onto the canvas; drag it back to the panel to remove it
 - Click an out port, then an in port, to run a pipe between them (Esc or right-click cancels)
 - Right-click a pipe to delete it
-- Click a pump to start/stop it, click a splitter to change its split
-- Hover anything for details (column splits, reactions, contents)
-- Space or RUN to process the feed; F cycles speed 1x/4x/16x; STOP scores early
+- Click a unit to open its faceplate: start/stop pumps, drag the setpoint slider, +/- buttons
+- Mouse wheel over a pump or splitter (or arrow keys on the selected one) tunes it
+- Hover anything for details (column splits, ratings, reactions, contents)
+- Space or RUN/PAUSE runs the plant live; F cycles speed 1x/4x/16x; RESTART restocks the feed
+- PRODUCT only counts streams at spec purity; reactors and columns lose performance above their rated GPM
 - Recycle loops need a tank in them; liquid with nowhere to go is spilled
 
 ## Setup

@@ -3,25 +3,38 @@ import pygame
 from goop_sim.sim.equipment import Equipment, Feed, Mixer, Outlet, Pump, Reactor, Separator, Splitter, Tank
 from goop_sim.sim.network import Pipe, Port
 
-PORT_RADIUS = 7
+PORT_RADIUS = 6
 GRID = 20
 
 _SIZES = {
-    Tank: (90, 110),
+    Tank: (80, 110),
     Pump: (40, 40),
-    Reactor: (90, 80),
-    Separator: (50, 130),
-    Splitter: (40, 40),
-    Mixer: (40, 40),
-    Feed: (100, 60),
-    Outlet: (110, 70),
+    Reactor: (80, 96),
+    Separator: (46, 150),
+    Splitter: (44, 30),
+    Mixer: (34, 34),
+    Feed: (110, 60),
+    Outlet: (110, 60),
 }
 
 
+def size_of(eq: Equipment) -> tuple[int, int]:
+    return next(size for cls, size in _SIZES.items() if isinstance(eq, cls))
+
+
 def rect_of(eq: Equipment, pos=None) -> pygame.Rect:
-    w, h = next(size for cls, size in _SIZES.items() if isinstance(eq, cls))
+    w, h = size_of(eq)
     cx, cy = pos or eq.pos
     return pygame.Rect(cx - w // 2, cy - h // 2, w, h)
+
+
+def fit_rect(eq: Equipment, box: pygame.Rect) -> pygame.Rect:
+    """The equipment's shape scaled down to fit `box`, centered (for icons)."""
+    w, h = size_of(eq)
+    scale = min(box.width / w, box.height / h)
+    rect = pygame.Rect(0, 0, max(4, round(w * scale)), max(4, round(h * scale)))
+    rect.center = box.center
+    return rect
 
 
 def port_pos(port: Port, pos=None) -> tuple[int, int]:
@@ -42,7 +55,7 @@ def all_ports(eq: Equipment):
 def pipe_points(pipe: Pipe) -> list[tuple[int, int]]:
     x1, y1 = port_pos(pipe.out)
     x2, y2 = port_pos(pipe.into)
-    if x2 >= x1 + 2 * GRID:
+    if x2 > x1 + 4:
         mx = (x1 + x2) // 2
         return [(x1, y1), (mx, y1), (mx, y2), (x2, y2)]
     # Backwards (recycle) pipe: step out, run below both ends, step back in.

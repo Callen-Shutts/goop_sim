@@ -20,7 +20,10 @@ class Namer:
 
 
 def make_pump(rng: random.Random, namer: Namer) -> Pump:
-    return Pump(namer("P"), max_gpm=rng.choice([100, 150, 200, 300, 400]))
+    """Random turndown range; the player tunes the setpoint inside it."""
+    max_gpm = rng.choice([150, 200, 300, 400, 600])
+    min_gpm = round(max_gpm * rng.choice([0.1, 0.2, 0.3]) / 5) * 5
+    return Pump(namer("P"), min_gpm=min_gpm, max_gpm=max_gpm)
 
 
 def make_tank(rng: random.Random, namer: Namer) -> Tank:
@@ -28,7 +31,12 @@ def make_tank(rng: random.Random, namer: Namer) -> Tank:
 
 
 def make_reactor(rng: random.Random, namer: Namer, reaction: Reaction) -> Reactor:
-    reactor = Reactor(namer("R"), reaction=reaction, conversion=round(rng.uniform(0.45, 0.9), 2))
+    reactor = Reactor(
+        namer("R"),
+        reaction=reaction,
+        conversion=round(rng.uniform(0.45, 0.9), 2),
+        rated_gpm=rng.choice([80, 120, 160, 200, 250]),
+    )
     if rng.random() < SIDE_REACTION_CHANCE:
         reactor.side = side_reaction_for(rng, reaction)
         reactor.side_conversion = round(rng.uniform(0.03, 0.15), 2)
@@ -42,7 +50,7 @@ def make_separator(rng: random.Random, namer: Namer) -> Separator:
         s: round(rng.uniform(0.85, 0.98) if s in lights else rng.uniform(0.02, 0.15), 2)
         for s in SPECIES
     }
-    return Separator(namer("C"), top=top)
+    return Separator(namer("C"), top=top, rated_gpm=rng.choice([100, 150, 200, 300]))
 
 
 def make_splitter(rng: random.Random, namer: Namer) -> Splitter:

@@ -5,9 +5,11 @@ import pygame
 from goop_sim import settings
 from goop_sim.run.state import RunState
 from goop_sim.scenes.base import Scene
-from goop_sim.sim.equipment import Pump, Splitter
+from goop_sim.sim.equipment import Pump, Reactor, Splitter
+from goop_sim.sim.network import Port
 from goop_sim.ui import theme, widgets
 from goop_sim.ui.geometry import (
+    GRID,
     PORT_RADIUS,
     all_ports,
     dist_to_segment,
@@ -17,33 +19,50 @@ from goop_sim.ui.geometry import (
     snap,
 )
 
-CANVAS_RIGHT = settings.SCREEN_WIDTH - theme.PANEL_WIDTH
+W, H = settings.SCREEN_WIDTH, settings.SCREEN_HEIGHT
+CANVAS_RIGHT = W - theme.PANEL_WIDTH
+CANVAS_TOP = theme.TOOLBAR_HEIGHT
+CANVAS_BOTTOM = H - theme.BOTTOM_BAR
 CLICK_SLOP = 4
 SIM_SPEED = 60.0  # simulated seconds per real second at 1x
-SPEEDS = (1, 4, 16)  # fast-forward multipliers, cycled with F or the speed button
+SPEEDS = (1, 4, 16)
 MAX_SUBSTEP = 2.0  # simulated seconds per Network.step
-IDLE_END = 1.5  # real seconds with no flow before an attempt ends by itself
+IDLE_END = 1.5  # real seconds with no flow and no feed before "out of feed"
+
+FACEPLATE = pygame.Rect(
+    CANVAS_RIGHT + 8, CANVAS_BOTTOM - theme.FACEPLATE_HEIGHT - 8, theme.PANEL_WIDTH - 16, theme.FACEPLATE_HEIGHT
+)
+INVENTORY = pygame.Rect(CANVAS_RIGHT + 8, CANVAS_TOP + 28, theme.PANEL_WIDTH - 16, FACEPLATE.top - CANVAS_TOP - 36)
 
 
 class PlayScene(Scene):
-    """Build the plant (drag, pipe, set pumps/splitters), then RUN it against the current contract.
+    """Build and operate the plant live.
 
-    Modes: "build" (editing), "running" (sim advancing; only pumps and splitters can be operated),
-    "result" (attempt scored, overlay waiting for a click).
+    Everything stays editable. RUN starts the flow; tune pumps and splitters (faceplate, mouse
+    wheel, arrow keys) and watch the colors until PRODUCT reads on-spec. The contract completes
+    as soon as enough on-spec product has arrived; running dry offers a restart.
     """
 
     def __init__(self, game, run: RunState):
         super().__init__(game)
         self.run = run
-        self.font = pygame.font.SysFont("arial", 14)
-        self.big = pygame.font.SysFont("arial", 24, bold=True)
-        self.mode = "build"
-        self.result = None  # {"ok", "title", "lines", "button"} while mode == "result"
-        self.pending = None  # Port the player clicked first while piping
+        self.font = pygame.font.SysFont("consolas", 13)
+        self.mid = pygame.font.SysFont("consolas", 15, bold=True)
+        self.big = pygame.font.SysFont("consolas", 26, bold=True)
+        self.running = False
+        self.speed = SPEEDS[0]
+        self.result = None  # {"kind", "title", "lines", "button"}
+        self.pending = None  # Port clicked first while piping
         self.drag = None  # {"eq", "offset", "start", "moved", "from_inventory", "pos"}
+        self.slider = None  # callback(x) while dragging a faceplate slider
+        self.selected = None
         self.mouse = (0, 0)
         self.idle = 0.0
-        self.speed = SPEEDS[0]
+        self.t = 0.0
+        self.scroll = 0
+        self.controls = []  # (rect, on_click, on_drag) rebuilt every draw
+        self.pipe_memory = {}  # last color seen in each pipe, so idle pipes stay tinted
+        self.grid = self._make_grid()
         self.place_fixtures()
 
     @property
@@ -51,9 +70,9 @@ class PlayScene(Scene):
         return self.run.net
 
     def place_fixtures(self):
-        mid = (settings.SCREEN_HEIGHT + theme.TOOLBAR_HEIGHT) // 2
+        mid = (CANVAS_TOP + CANVAS_BOTTOM) // 2
         spots = {
-            self.run.feed: (80, mid),
+            self.run.feed: (70, mid),
             self.run.product: (CANVAS_RIGHT - 80, mid - 120),
             self.run.waste: (CANVAS_RIGHT - 80, mid + 120),
         }
@@ -61,29 +80,34 @@ class PlayScene(Scene):
             if eq.pos is None:
                 eq.pos = snap(pos)
 
-    # -- layout helpers -------------------------------------------------
+    def _make_grid(self):
+        surf = pygame.Surface((CANVAS_RIGHT, CANVAS_BOTTOM - CANVAS_TOP))
+        surf.fill(theme.BACKGROUND)
+        for x in range(0, CANVAS_RIGHT, GRID):
+            for y in range(0, CANVAS_BOTTOM - CANVAS_TOP, GRID):
+                surf.set_at((x, y), theme.GRID_DOT)
+        return surf
+
+    # -- hit testing -----------------------------------------------------
 
     def card_rect(self, index: int) -> pygame.Rect:
-        y = theme.TOOLBAR_HEIGHT + 36 + index * (theme.CARD_HEIGHT + theme.CARD_GAP)
-        return pygame.Rect(CANVAS_RIGHT + 12, y, theme.PANEL_WIDTH - 24, theme.CARD_HEIGHT)
+        y = INVENTORY.y + index * (theme.CARD_HEIGHT + theme.CARD_GAP) - self.scroll
+        return pygame.Rect(INVENTORY.x, y, INVENTORY.width, theme.CARD_HEIGHT)
 
-    def run_button_rect(self) -> pygame.Rect:
-        return pygame.Rect(CANVAS_RIGHT + 12, settings.SCREEN_HEIGHT - 56, theme.PANEL_WIDTH - 24, 44)
+    def max_scroll(self) -> int:
+        content = len(self.run.inventory) * (theme.CARD_HEIGHT + theme.CARD_GAP)
+        return max(0, content - INVENTORY.height)
 
-    def speed_button_rect(self) -> pygame.Rect:
-        return pygame.Rect(CANVAS_RIGHT + 12, settings.SCREEN_HEIGHT - 96, theme.PANEL_WIDTH - 24, 32)
+    def card_at(self, pos):
+        if not INVENTORY.collidepoint(pos):
+            return None
+        for i, item in enumerate(self.run.inventory):
+            if self.card_rect(i).collidepoint(pos):
+                return item
+        return None
 
-    def cycle_speed(self):
-        self.speed = SPEEDS[(SPEEDS.index(self.speed) + 1) % len(SPEEDS)]
-
-    def result_rect(self) -> pygame.Rect:
-        rect = pygame.Rect(0, 0, 440, 230)
-        rect.center = (CANVAS_RIGHT // 2, (settings.SCREEN_HEIGHT + theme.TOOLBAR_HEIGHT) // 2)
-        return rect
-
-    def continue_rect(self) -> pygame.Rect:
-        box = self.result_rect()
-        return pygame.Rect(box.centerx - 100, box.bottom - 60, 200, 42)
+    def in_canvas(self, pos) -> bool:
+        return pos[0] < CANVAS_RIGHT and CANVAS_TOP <= pos[1] < CANVAS_BOTTOM
 
     def port_at(self, pos):
         for eq in self.net.equipment:
@@ -94,14 +118,8 @@ class PlayScene(Scene):
 
     def equipment_at(self, pos):
         for eq in reversed(self.net.equipment):
-            if rect_of(eq).collidepoint(pos):
+            if rect_of(eq).inflate(6, 6).collidepoint(pos):
                 return eq
-        return None
-
-    def card_at(self, pos):
-        for i, item in enumerate(self.run.inventory):
-            if self.card_rect(i).collidepoint(pos):
-                return item
         return None
 
     def pipe_at(self, pos):
@@ -111,14 +129,71 @@ class PlayScene(Scene):
                 return pipe
         return None
 
-    # -- input ----------------------------------------------------------
+    def result_rect(self) -> pygame.Rect:
+        rect = pygame.Rect(0, 0, 480, 250)
+        rect.center = (CANVAS_RIGHT // 2, (CANVAS_TOP + CANVAS_BOTTOM) // 2)
+        return rect
+
+    def continue_rect(self) -> pygame.Rect:
+        box = self.result_rect()
+        return pygame.Rect(box.centerx - 140, box.bottom - 58, 280, 40)
+
+    # -- actions -----------------------------------------------------------
+
+    def toggle_run(self):
+        self.running = not self.running
+        self.idle = 0.0
+
+    def cycle_speed(self):
+        self.speed = SPEEDS[(SPEEDS.index(self.speed) + 1) % len(SPEEDS)]
+
+    def restart(self):
+        if self.run.restart():
+            self.running = False
+            self.pipe_memory.clear()
+            self.result = None
+
+    def nudge(self, eq, steps):
+        if isinstance(eq, (Pump, Splitter)):
+            eq.nudge(steps)
+
+    def show_result(self, kind):
+        run, c = self.run, self.run.contract
+        lines = [
+            f"ON-SPEC {c.species}   {c.delivered(run.product):,.0f} / {c.quantity_gal:,.0f} GAL",
+            f"OFF-SPEC REJECTED  {run.product.rejected_gal:,.0f} GAL",
+            f"SPILLED            {self.net.spilled_gal:,.0f} GAL",
+        ]
+        if kind == "met":
+            title, button = f"CONTRACT {run.level} COMPLETE", "PICK NEW EQUIPMENT"
+            lines.append(f"FEED LEFT          {run.feed.stock.total():,.0f} GAL")
+        elif run.restarts_left > 0:
+            title, button = "OUT OF FEED", f"RESTART CONTRACT ({run.restarts_left} LEFT)"
+            lines.append("Restart restocks feed and empties the plant.")
+        else:
+            title, button = "RUN OVER", "START A NEW RUN"
+            lines.append(f"You reached contract {run.level}.")
+        self.result = {"kind": kind, "title": title, "lines": lines, "button": button}
+        self.running = False
+
+    def on_continue(self):
+        if self.result["kind"] == "met":
+            from goop_sim.scenes.draft import DraftScene
+
+            self.game.change_scene(DraftScene(self.game, self.run))
+        elif self.run.restarts_left > 0:
+            self.restart()
+        else:
+            self.game.new_run()
+
+    # -- input -------------------------------------------------------------
 
     def handle_event(self, event):
         if event.type == pygame.MOUSEMOTION:
             self.mouse = event.pos
             self.on_motion(event.pos)
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            if self.mode == "result":
+            if self.result:
                 if event.button == 1 and self.continue_rect().collidepoint(event.pos):
                     self.on_continue()
             elif event.button == 1:
@@ -127,67 +202,77 @@ class PlayScene(Scene):
                 self.on_right_down(event.pos)
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             self.on_left_up(event.pos)
+        elif event.type == pygame.MOUSEWHEEL and not self.result:
+            if INVENTORY.collidepoint(self.mouse):
+                self.scroll = max(0, min(self.max_scroll(), self.scroll - event.y * 30))
+            elif self.in_canvas(self.mouse):
+                self.nudge(self.equipment_at(self.mouse), event.y)
+            elif FACEPLATE.collidepoint(self.mouse):
+                self.nudge(self.selected, event.y)
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
+            if self.result:
+                if event.key == pygame.K_RETURN:
+                    self.on_continue()
+            elif event.key == pygame.K_ESCAPE:
                 self.pending = None
-            elif event.key == pygame.K_SPACE and self.mode != "result":
-                self.press_run()
+                self.selected = None
+            elif event.key == pygame.K_SPACE:
+                self.toggle_run()
             elif event.key == pygame.K_f:
                 self.cycle_speed()
-            elif event.key == pygame.K_RETURN and self.mode == "result":
-                self.on_continue()
-
-    def operate(self, eq):
-        if isinstance(eq, Pump):
-            eq.toggle()
-        elif isinstance(eq, Splitter):
-            eq.cycle()
+            elif event.key in (pygame.K_UP, pygame.K_RIGHT):
+                self.nudge(self.selected, 1)
+            elif event.key in (pygame.K_DOWN, pygame.K_LEFT):
+                self.nudge(self.selected, -1)
 
     def on_left_down(self, pos):
-        if self.run_button_rect().collidepoint(pos):
-            self.press_run()
-            return
-        if self.speed_button_rect().collidepoint(pos):
-            self.cycle_speed()
-            return
-        if self.mode == "running":
-            self.operate(self.equipment_at(pos))
-            return
-        port = self.port_at(pos)
-        if port:
-            if self.pending is None:
-                if not self.net.pipe_at(port):
-                    self.pending = port
+        for rect, on_click, on_drag in self.controls:
+            if rect.collidepoint(pos):
+                on_click(pos)
+                self.slider = on_drag
+                return
+        if self.in_canvas(pos):
+            port = self.port_at(pos)
+            if port:
+                if self.pending is None:
+                    if not self.net.pipe_at(port):
+                        self.pending = port
+                else:
+                    self.net.connect(self.pending, port)
+                    self.pending = None
+                return
+            self.pending = None
+            eq = self.equipment_at(pos)
+            if eq is None:
+                self.selected = None
+            elif eq.fixed:
+                self.selected = eq
             else:
-                self.net.connect(self.pending, port)
-                self.pending = None
-            return
-        self.pending = None
-        eq = self.equipment_at(pos)
-        if eq and not eq.fixed:
-            self.drag = {
-                "eq": eq,
-                "offset": (eq.pos[0] - pos[0], eq.pos[1] - pos[1]),
-                "start": pos,
-                "moved": False,
-                "from_inventory": False,
-            }
+                self.drag = {
+                    "eq": eq,
+                    "offset": (eq.pos[0] - pos[0], eq.pos[1] - pos[1]),
+                    "start": pos,
+                    "moved": False,
+                    "from_inventory": False,
+                }
             return
         item = self.card_at(pos)
         if item:
-            self.drag = {"eq": item, "offset": (0, 0), "start": pos, "moved": True, "from_inventory": True, "pos": pos}
+            self.drag = {"eq": item, "offset": (0, 0), "start": pos, "moved": False, "from_inventory": True, "pos": pos}
 
     def on_right_down(self, pos):
-        if self.mode != "build":
-            return
         if self.pending:
             self.pending = None
             return
         pipe = self.pipe_at(pos)
         if pipe:
             self.net.disconnect(pipe)
+            self.pipe_memory.pop(pipe, None)
 
     def on_motion(self, pos):
+        if self.slider:
+            self.slider(pos)
+            return
         d = self.drag
         if not d:
             return
@@ -202,74 +287,38 @@ class PlayScene(Scene):
             d["eq"].pos = new_pos
 
     def on_left_up(self, pos):
+        self.slider = None
         d = self.drag
         if not d:
             return
         self.drag = None
         eq = d["eq"]
         if not d["moved"]:
-            self.operate(eq)
+            if not d["from_inventory"]:
+                self.selected = eq
             return
-        if pos[0] >= CANVAS_RIGHT or pos[1] < theme.TOOLBAR_HEIGHT:
+        if not self.in_canvas(pos):
             if not d["from_inventory"]:
                 self.net.remove(eq)
                 eq.pos = None
                 eq.reset()
                 self.run.inventory.append(eq)
+                if self.selected is eq:
+                    self.selected = None
             return
         target = snap((pos[0] + d["offset"][0], pos[1] + d["offset"][1]))
         if d["from_inventory"]:
             self.run.inventory.remove(eq)
             self.net.add(eq)
+            self.scroll = min(self.scroll, self.max_scroll())
         eq.pos = target
+        self.selected = eq
 
-    def press_run(self):
-        if self.mode == "build":
-            self.mode = "running"
-            self.pending = None
-            self.drag = None
-            self.idle = 0.0
-        elif self.mode == "running":
-            self.end_attempt()
-
-    def end_attempt(self):
-        run = self.run
-        contract = run.contract
-        received = run.product.received
-        ok = run.finish_attempt()
-        lines = [
-            f"Delivered {contract.delivered(received):,.0f} / {contract.quantity_gal:,.0f} GAL {contract.species}",
-            f"Purity {received.fraction(contract.species):.0%}  (need {contract.purity:.0%})",
-        ]
-        if run.net.spilled_gal > 0.5:
-            lines.append(f"Spilled {run.net.spilled_gal:,.0f} GAL")
-        if ok:
-            title, button = f"CONTRACT {run.level} MET", "PICK EQUIPMENT"
-        elif run.over:
-            title, button = "RUN OVER", "NEW RUN"
-            lines.append(f"You reached contract {run.level}.")
-        else:
-            title, button = "CONTRACT FAILED", "BACK TO BUILD"
-            lines.append(f"{run.attempts_left} attempt(s) left. Plant layout is kept.")
-        self.result = {"ok": ok, "title": title, "lines": lines, "button": button}
-        self.mode = "result"
-
-    def on_continue(self):
-        if self.result["ok"]:
-            from goop_sim.scenes.draft import DraftScene
-
-            self.game.change_scene(DraftScene(self.game, self.run))
-        elif self.run.over:
-            self.game.new_run()
-        else:
-            self.run.reset_plant()
-            self.result = None
-            self.mode = "build"
-
-    # -- loop -----------------------------------------------------------
+    # -- loop --------------------------------------------------------------
 
     def update(self, dt):
-        if self.mode != "running":
+        self.t += dt
+        if self.result or not self.running:
             return
         sim_dt = dt * SIM_SPEED * self.speed
         steps = max(1, math.ceil(sim_dt / MAX_SUBSTEP))
@@ -277,85 +326,205 @@ class PlayScene(Scene):
         for _ in range(steps):
             self.net.step(sim_dt / steps)
             moved += self.net.moved_gal
+            if self.run.met:
+                self.show_result("met")
+                return
         self.idle = 0.0 if moved > 1e-6 else self.idle + dt
-        if self.idle >= IDLE_END:
-            self.end_attempt()
+        if self.run.feed_empty and self.idle >= IDLE_END:
+            self.show_result("dry")
+
+    # -- drawing -----------------------------------------------------------
+
+    def pipe_color(self, pipe):
+        color = widgets.blend(pipe.carried)
+        if color:
+            self.pipe_memory[pipe] = color
+            return color
+        old = self.pipe_memory.get(pipe)
+        return widgets.mix(old, theme.PIPE_EMPTY, 0.5) if old else None
 
     def draw(self, surface):
-        run = self.run
+        self.controls = []
         surface.fill(theme.BACKGROUND)
+        surface.blit(self.grid, (0, CANVAS_TOP))
         self.draw_legend(surface)
-        for pipe in self.net.pipes:
-            widgets.draw_pipe(surface, pipe)
-        for eq in self.net.equipment:
+
+        net = self.net
+        for pipe in net.pipes:
+            flowing = self.running and net.last_dt > 0
+            gpm = pipe.carried.total() * 60 / net.last_dt if flowing else 0.0
+            widgets.draw_pipe(surface, pipe_points(pipe), self.pipe_color(pipe), gpm, self.t)
+        for eq in net.equipment:
             hot = self.pending if self.pending and self.pending.equipment is eq else None
-            widgets.draw_equipment(surface, self.font, eq, highlight=hot)
+            fill = None
+            if isinstance(eq, Reactor):
+                out = net.pipe_at(Port(eq, "out"))
+                fill = self.pipe_color(out) if out else None
+            spec = self.run.contract.spec if eq is self.run.product else None
+            widgets.draw_equipment(surface, self.font, eq, highlight=hot, selected=eq is self.selected, fill=fill, spec=spec)
         if self.pending:
             pygame.draw.line(surface, theme.PORT_HOT, port_pos(self.pending), self.mouse, 2)
 
-        pygame.draw.rect(
-            surface, theme.PANEL, (CANVAS_RIGHT, theme.TOOLBAR_HEIGHT, theme.PANEL_WIDTH, settings.SCREEN_HEIGHT)
-        )
-        widgets.draw_label(
-            surface, self.font, (CANVAS_RIGHT + theme.PANEL_WIDTH // 2, theme.TOOLBAR_HEIGHT + 18), "EQUIPMENT"
-        )
-        for i, item in enumerate(run.inventory):
-            if self.drag and self.drag["eq"] is item and self.drag["from_inventory"]:
-                continue
-            widgets.draw_card(surface, self.font, self.card_rect(i), item)
-        widgets.draw_button(surface, self.font, self.speed_button_rect(), f"SPEED {self.speed}x  (F)", theme.TOOLBAR)
-        if self.mode == "build":
-            widgets.draw_button(surface, self.font, self.run_button_rect(), "RUN  (SPACE)")
-        elif self.mode == "running":
-            widgets.draw_button(surface, self.font, self.run_button_rect(), "STOP + SCORE", theme.BUTTON_STOP)
-        else:
-            widgets.draw_button(surface, self.font, self.run_button_rect(), "SCORED", theme.BUTTON_DISABLED)
+        self.draw_panel(surface)
+        self.draw_header(surface)
+        self.draw_softkeys(surface)
 
         if self.drag and self.drag["moved"] and self.drag["from_inventory"]:
             widgets.draw_equipment(surface, self.font, self.drag["eq"], pos=self.drag["pos"], ports=False)
 
-        self.draw_toolbar(surface)
-        if self.mode == "result":
+        if self.result:
             self.draw_result(surface)
-        elif not self.drag:
-            hover = self.equipment_at(self.mouse) if self.mouse[0] < CANVAS_RIGHT else self.card_at(self.mouse)
-            if hover:
+        elif not self.drag and not self.slider:
+            hover = self.equipment_at(self.mouse) if self.in_canvas(self.mouse) else self.card_at(self.mouse)
+            if hover and hover is not self.selected:
                 widgets.draw_tooltip(surface, self.font, self.mouse, widgets.details(hover))
 
-    def draw_toolbar(self, surface):
+    def draw_header(self, surface):
         run, c = self.run, self.run.contract
-        left = f"CONTRACT {run.level}:  {c.summary}      ATTEMPTS {run.attempts_left}"
-        got = run.product.received
-        right = f"PRODUCT {c.species} {c.delivered(got):,.0f} GAL  {got.fraction(c.species):.0%}"
-        color = theme.TOOLBAR_TEXT
-        if self.net.spilled_gal > 0.5:
-            right = f"SPILL {self.net.spilled_gal:,.0f} GAL    " + right
-            color = theme.PORT_HOT
-        widgets.draw_toolbar(surface, self.font, settings.SCREEN_WIDTH, left, right, color)
+        pygame.draw.rect(surface, theme.PANEL, (0, 0, W, CANVAS_TOP))
+        pygame.draw.line(surface, theme.PANEL_EDGE, (0, CANVAS_TOP - 1), (W, CANVAS_TOP - 1))
+        widgets.draw_text(surface, self.mid, (14, CANVAS_TOP // 2), f"CONTRACT {run.level}", theme.TAG_TEXT, "midleft")
+        widgets.draw_text(surface, self.font, (130, CANVAS_TOP // 2), f"MAKE {c.summary}", theme.TEXT, "midleft")
+        bar = pygame.Rect(470, 12, 220, 16)
+        done = c.delivered(run.product)
+        widgets.draw_bar(surface, bar, done / c.quantity_gal, theme.SPECIES.get(c.species, theme.OK))
+        widgets.draw_text(surface, self.font, (bar.right + 8, bar.centery), f"{done:,.0f}/{c.quantity_gal:,.0f}", theme.VALUE_TEXT, "midleft")
+        rej, spill = run.product.rejected_gal, self.net.spilled_gal
+        right = f"FEED {run.feed.stock.total():,.0f}   OFF-SPEC {rej:,.0f}   SPILL {spill:,.0f}"
+        color = theme.WARN if rej > 0.5 or spill > 0.5 else theme.TEXT
+        widgets.draw_text(surface, self.font, (W - 14, CANVAS_TOP // 2), right, color, "midright")
+
+    def draw_panel(self, surface):
+        pygame.draw.rect(surface, theme.PANEL, (CANVAS_RIGHT, CANVAS_TOP, theme.PANEL_WIDTH, CANVAS_BOTTOM - CANVAS_TOP))
+        pygame.draw.line(surface, theme.PANEL_EDGE, (CANVAS_RIGHT, CANVAS_TOP), (CANVAS_RIGHT, CANVAS_BOTTOM))
+        widgets.draw_text(surface, self.mid, (CANVAS_RIGHT + 12, CANVAS_TOP + 14), "INVENTORY", theme.TAG_TEXT, "midleft")
+        if self.max_scroll():
+            widgets.draw_text(surface, self.font, (W - 12, CANVAS_TOP + 14), "wheel to scroll", theme.MUTED, "midright")
+        surface.set_clip(INVENTORY)
+        for i, item in enumerate(self.run.inventory):
+            if self.drag and self.drag["eq"] is item and self.drag["moved"]:
+                continue
+            widgets.draw_card(surface, self.font, self.card_rect(i), item)
+        surface.set_clip(None)
+        if not self.run.inventory:
+            widgets.draw_text(surface, self.font, INVENTORY.center, "(all equipment placed)", theme.MUTED)
+        self.draw_faceplate(surface)
+
+    def draw_faceplate(self, surface):
+        rect, eq = FACEPLATE, self.selected
+        widgets.draw_frame(surface, self.font, rect, f"FACEPLATE  {eq.name}" if eq else "FACEPLATE")
+        x, y, w = rect.x + 10, rect.y + 28, rect.width - 20
+        if eq is None:
+            for i, line in enumerate(["Click a unit to inspect", "and tune it here.", "", "Wheel over a pump or", "splitter to adjust it."]):
+                widgets.draw_text(surface, self.font, (x, y + 4 + i * 18), line, theme.MUTED, "topleft")
+            return
+        if isinstance(eq, Pump):
+            btn = pygame.Rect(x, y, 104, 28)
+            fill, label = (theme.KEY_ACTIVE, "RUNNING") if eq.running else (theme.KEY_DANGER, "STOPPED")
+            widgets.draw_button(surface, self.font, btn, label, fill)
+            self.controls.append((btn, lambda _p, p=eq: p.toggle(), None))
+            widgets.draw_value_box(surface, self.font, (btn.right + 52, btn.centery), f"PV {eq.flow_gpm:4.0f}")
+            self._slider(
+                surface,
+                y + 42,
+                f"SETPOINT {eq.setpoint_gpm:.0f} GPM",
+                (eq.setpoint_gpm - eq.min_gpm) / max(1e-9, eq.max_gpm - eq.min_gpm),
+                f"{eq.min_gpm:.0f}",
+                f"{eq.max_gpm:.0f}",
+                lambda f, p=eq: p.set_setpoint(round((p.min_gpm + f * (p.max_gpm - p.min_gpm)) / 5) * 5),
+                eq,
+                f"STEP {eq.step_gpm:.0f}",
+            )
+        elif isinstance(eq, Splitter):
+            widgets.draw_text(surface, self.font, (x, y + 6), "Share of flow to TOP outlet", theme.MUTED, "topleft")
+            self._slider(
+                surface,
+                y + 42,
+                f"TOP {eq.ratio:.0%}  /  BTM {1 - eq.ratio:.0%}",
+                eq.ratio,
+                "0%",
+                "100%",
+                lambda f, s=eq: s.set_ratio(f),
+                eq,
+                "STEP 5%",
+            )
+        else:
+            for i, line in enumerate(widgets.details(eq)[1:9]):
+                widgets.draw_text(surface, self.font, (x, y + i * 18), line, theme.TEXT, "topleft")
+
+    def _slider(self, surface, y, label, fraction, lo, hi, set_fraction, eq, step_text):
+        x, w = FACEPLATE.x + 10, FACEPLATE.width - 20
+        widgets.draw_text(surface, self.mid, (x, y), label, theme.VALUE_TEXT, "topleft")
+        bar = pygame.Rect(x, y + 24, w, 18)
+        widgets.draw_bar(surface, bar, fraction, theme.TAG_TEXT)
+        knob = pygame.Rect(0, 0, 6, 24)
+        knob.center = (bar.x + round(bar.width * fraction), bar.centery)
+        pygame.draw.rect(surface, theme.TEXT, knob)
+        widgets.draw_text(surface, self.font, (x, bar.bottom + 4), lo, theme.MUTED, "topleft")
+        widgets.draw_text(surface, self.font, (x + w, bar.bottom + 4), hi, theme.MUTED, "topright")
+
+        def drag(pos, bar=bar):
+            set_fraction(max(0.0, min(1.0, (pos[0] - bar.x) / bar.width)))
+
+        self.controls.append((bar.inflate(0, 10), drag, drag))
+        minus = pygame.Rect(x, bar.bottom + 26, 56, 30)
+        plus = pygame.Rect(x + w - 56, bar.bottom + 26, 56, 30)
+        widgets.draw_button(surface, self.mid, minus, "-")
+        widgets.draw_button(surface, self.mid, plus, "+")
+        widgets.draw_text(surface, self.font, (x + w // 2, minus.centery), step_text, theme.MUTED)
+        self.controls.append((minus, lambda _p: eq.nudge(-1), None))
+        self.controls.append((plus, lambda _p: eq.nudge(1), None))
+
+    def draw_softkeys(self, surface):
+        top = CANVAS_BOTTOM
+        pygame.draw.rect(surface, theme.PANEL, (0, top, W, H - top))
+        pygame.draw.line(surface, theme.PANEL_EDGE, (0, top), (W, top))
+        x = 8
+        keys = [
+            ("PAUSE  [SPACE]" if self.running else "RUN  [SPACE]", self.toggle_run, theme.KEY_ACTIVE if self.running else theme.KEY, 160),
+            (f"SPEED {self.speed}x  [F]", self.cycle_speed, theme.KEY, 130),
+            (
+                f"RESTART ({self.run.restarts_left})",
+                self.restart,
+                theme.KEY if self.run.restarts_left else theme.KEY_DISABLED,
+                140,
+            ),
+        ]
+        for label, action, fill, width in keys:
+            rect = pygame.Rect(x, top + 6, width, H - top - 12)
+            widgets.draw_button(surface, self.font, rect, label, fill)
+            self.controls.append((rect, lambda _p, a=action: a(), None))
+            x += width + 8
+        state = "RUNNING" if self.running else "PAUSED"
+        widgets.draw_text(surface, self.font, (x + 8, top + 14), state, theme.OK if self.running else theme.MUTED, "midleft")
+        hint = "drag cards to place  |  out port -> in port to pipe  |  right-click pipe to remove  |  wheel to tune"
+        widgets.draw_text(surface, self.font, (x + 8, top + 33), hint, theme.MUTED, "midleft")
 
     def draw_legend(self, surface):
         reactions = self.run.chem.known(self.run.level)
-        lines = [r.label for r in reactions]
-        height = 30 + 18 * len(lines)
-        rect = pygame.Rect(12, settings.SCREEN_HEIGHT - 12 - height, 170, height)
-        widgets.draw_panel_box(surface, self.font, rect, "KNOWN REACTIONS", lines)
-        x = rect.right + 16
+        height = 48 + 18 * len(reactions)
+        rect = pygame.Rect(10, CANVAS_BOTTOM - height - 10, 190, height)
+        widgets.draw_frame(surface, self.font, rect, "REACTIONS")
+        for i, reaction in enumerate(reactions):
+            widgets.draw_text(surface, self.font, (rect.x + 10, rect.y + 26 + i * 18), reaction.label, theme.TEXT, "topleft")
+        x = rect.x + 10
         for species, color in theme.SPECIES.items():
-            pygame.draw.rect(surface, color, (x, rect.bottom - 16, 14, 14))
-            widgets.draw_label(surface, self.font, (x + 24, rect.bottom - 9), species)
-            x += 40
+            chip = pygame.Rect(x, rect.bottom - 20, 12, 12)
+            pygame.draw.rect(surface, color, chip)
+            widgets.draw_text(surface, self.font, (chip.right + 4, chip.centery), species, theme.TEXT, "midleft")
+            x += 35
 
     def draw_result(self, surface):
         shade = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
         shade.fill(theme.OVERLAY_SHADE)
         surface.blit(shade, (0, 0))
         box = self.result_rect()
-        pygame.draw.rect(surface, theme.VALUE_BOX, box)
-        pygame.draw.rect(surface, theme.TANK_OUTLINE, box, 2)
-        color = theme.OK if self.result["ok"] else theme.ALARM
-        widgets.draw_label(surface, self.big, (box.centerx, box.y + 30), self.result["title"], color)
-        y = box.y + 66
+        good = self.result["kind"] == "met"
+        pygame.draw.rect(surface, theme.PANEL, box)
+        pygame.draw.rect(surface, theme.OK if good else theme.ALARM, box, 2)
+        widgets.draw_text(surface, self.big, (box.centerx, box.y + 32), self.result["title"], theme.OK if good else theme.ALARM)
+        y = box.y + 70
         for line in self.result["lines"]:
-            widgets.draw_label(surface, self.font, (box.centerx, y), line)
+            widgets.draw_text(surface, self.font, (box.x + 40, y), line, theme.TEXT, "topleft")
             y += 20
-        widgets.draw_button(surface, self.font, self.continue_rect(), self.result["button"])
+        widgets.draw_button(surface, self.mid, self.continue_rect(), self.result["button"], theme.KEY_ACTIVE if good else theme.KEY)
